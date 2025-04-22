@@ -1,11 +1,10 @@
 # This file was adapted from https://github.com/stanford-cs336/assignment1-basics
 # and is licensed under the MIT License.
-
 import os
-import sys
-from typing import BinaryIO
 import re
 from collections import Counter
+from multiprocessing import Pool, cpu_count
+from typing import BinaryIO
 
 
 def find_chunk_boundaries(file: BinaryIO, desired_num_chunks: int, split_special_token: bytes) -> list[int]:
@@ -71,6 +70,18 @@ def pretokenize_chunk(text: str, special_tokens: tuple[str]) -> dict[str, int]:
     return pre_token_counts
 
 
+def load_and_tokenize_chunk(args):
+    """
+    Loads the chunk of the file and applies pretokenization.
+    This function is run in a separate process.
+    """
+    file_path, start, end, special_tokens = args
+    with open(file_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        return pretokenize_chunk(chunk, special_tokens)
+
+
 if __name__ == "__main__":
     text_file_path = "/media/bryan/ssd01/data/cs336/TinyStoriesV2-GPT4-valid.txt"
     special_tokens = ("<|endoftext|>",)
@@ -78,15 +89,14 @@ if __name__ == "__main__":
 
     with open(text_file_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, "<|endoftext|>".encode("utf-8"))
-        print(boundaries)
 
-        # The following is a serial implementation, but you can parallelize this
-        # by sending each start/end pair to a set of processes.
-        total_pre_token_counts = Counter()
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            # Run pre-tokenization on your chunk and store the counts for each pre-token
-            pre_token_counts = pretokenize_chunk(chunk, special_tokens)
-            total_pre_token_counts.update(pre_token_counts)
-        print(total_pre_token_counts)
+    chunk_args = [(text_file_path, start, end, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
+
+    with Pool(processes=num_processes) as pool:
+        results = pool.map(load_and_tokenize_chunk, chunk_args)
+
+    total_pre_token_counts = Counter()
+    for result in results:
+        total_pre_token_counts.update(result)
+
+    print(total_pre_token_counts)
