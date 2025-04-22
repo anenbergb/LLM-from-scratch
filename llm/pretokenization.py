@@ -1,7 +1,7 @@
 # This file was adapted from https://github.com/stanford-cs336/assignment1-basics
 # and is licensed under the MIT License.
 import os
-import re
+import regex as re
 from collections import Counter
 from multiprocessing import Pool, cpu_count
 from typing import BinaryIO
@@ -90,7 +90,7 @@ def load_and_pretokenize_file(file_path: str, special_tokens: tuple[str], num_pr
     with open(file_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, "<|endoftext|>".encode("utf-8"))
 
-    chunk_args = [(text_file_path, start, end, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
+    chunk_args = [(file_path, start, end, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
 
     with Pool(processes=num_processes) as pool:
         results = pool.map(load_and_pretokenize_chunk, chunk_args)
@@ -101,10 +101,52 @@ def load_and_pretokenize_file(file_path: str, special_tokens: tuple[str], num_pr
     return total_pre_token_counts
 
 
+def load_and_pretokenize_file_debug(
+    file_path: str, special_tokens: tuple[str], num_processes: int = 8
+) -> dict[str, int]:
+    """
+    Sequentially loads and pre-tokenizes chunks of the file.
+    """
+    with open(file_path, "rb") as f:
+        boundaries = find_chunk_boundaries(f, num_processes, "<|endoftext|>".encode("utf-8"))
+
+    total_pre_token_counts = Counter()
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            chunk = f.read(end - start).decode("utf-8", errors="ignore")
+            chunk_counts = pretokenize_chunk(chunk, special_tokens)
+            total_pre_token_counts.update(chunk_counts)
+
+    return total_pre_token_counts
+
+
 if __name__ == "__main__":
-    text_file_path = "/media/bryan/ssd01/data/cs336/TinyStoriesV2-GPT4-valid.txt"
-    special_tokens = ("<|endoftext|>",)
-    num_processes = 8
-    total_pre_token_counts = load_and_pretokenize_file(text_file_path, special_tokens, num_processes)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Pre-tokenize a text file.")
+    parser.add_argument(
+        "--file_path",
+        type=str,
+        default="/media/bryan/ssd01/data/cs336/TinyStoriesV2-GPT4-valid.txt",
+        help="Path to the text file to pre-tokenize.",
+    )
+    parser.add_argument(
+        "--special_tokens", type=str, nargs="+", default=["<|endoftext|>"], help="List of special tokens."
+    )
+    parser.add_argument("--num_processes", type=int, default=8, help="Number of processes to use.")
+    parser.add_argument("--debug", action="store_true", help="Run in debug mode without multiprocessing.")
+
+    args = parser.parse_args()
+
+    if args.debug:
+        total_pre_token_counts = load_and_pretokenize_file_debug(
+            args.file_path, tuple(args.special_tokens), args.num_processes
+        )
+    else:
+        total_pre_token_counts = load_and_pretokenize_file(
+            args.file_path, tuple(args.special_tokens), args.num_processes
+        )
+
     for token, count in total_pre_token_counts.most_common(10):
-        print(f"Token: {token}, Count: {count}")
+        print(f"Token: {repr(token)}, Count: {count}")
