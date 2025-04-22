@@ -6,6 +6,10 @@ from collections import Counter
 from multiprocessing import Pool, cpu_count
 from typing import BinaryIO
 
+# regex-based pre-tokenizer (used by GPT-2; Radford et al., 2019)
+# from github.com/openai/tiktoken/pull/234/files:
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
 
 def find_chunk_boundaries(file: BinaryIO, desired_num_chunks: int, split_special_token: bytes) -> list[int]:
     """
@@ -62,15 +66,15 @@ def pretokenize_chunk(text: str, special_tokens: tuple[str]) -> dict[str, int]:
     documents = split_text_on_special_tokens(text, special_tokens)
     pre_token_counts = Counter()
     for document in documents:
-        # Split the document into tokens based on whitespace
-        tokens = document.split()
-        # Count the occurrences of each token
-        token_counts = Counter(tokens)
-        pre_token_counts.update(token_counts)
+        for token in re.finditer(PAT, document):
+            # Extract the token from the match object
+            token = token.group(0)
+            # Otherwise, add it to the pre-token counts
+            pre_token_counts[token] += 1
     return pre_token_counts
 
 
-def load_and_tokenize_chunk(args):
+def load_and_pretokenize_chunk(args):
     """
     Loads the chunk of the file and applies pretokenization.
     This function is run in a separate process.
@@ -82,21 +86,25 @@ def load_and_tokenize_chunk(args):
         return pretokenize_chunk(chunk, special_tokens)
 
 
-if __name__ == "__main__":
-    text_file_path = "/media/bryan/ssd01/data/cs336/TinyStoriesV2-GPT4-valid.txt"
-    special_tokens = ("<|endoftext|>",)
-    num_processes = 8
-
-    with open(text_file_path, "rb") as f:
+def load_and_pretokenize_file(file_path: str, special_tokens: tuple[str], num_processes: int = 32) -> dict[str, int]:
+    with open(file_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, "<|endoftext|>".encode("utf-8"))
 
     chunk_args = [(text_file_path, start, end, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
 
     with Pool(processes=num_processes) as pool:
-        results = pool.map(load_and_tokenize_chunk, chunk_args)
+        results = pool.map(load_and_pretokenize_chunk, chunk_args)
 
     total_pre_token_counts = Counter()
     for result in results:
         total_pre_token_counts.update(result)
+    return total_pre_token_counts
 
-    print(total_pre_token_counts)
+
+if __name__ == "__main__":
+    text_file_path = "/media/bryan/ssd01/data/cs336/TinyStoriesV2-GPT4-valid.txt"
+    special_tokens = ("<|endoftext|>",)
+    num_processes = 8
+    total_pre_token_counts = load_and_pretokenize_file(text_file_path, special_tokens, num_processes)
+    for token, count in total_pre_token_counts.most_common(10):
+        print(f"Token: {token}, Count: {count}")
