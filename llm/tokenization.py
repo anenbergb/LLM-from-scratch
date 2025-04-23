@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from collections import Counter
+from collections import Counter, defaultdict
 
 from llm.pretokenization import load_and_pretokenize_file
 
@@ -66,7 +66,8 @@ def run_train_bpe(
     pre_token_indices_counts = {
         tuple(map(int, string.encode("utf-8"))): count for string, count in pre_token_counts.items()
     }
-    pair_counts = get_pair_counts(pre_token_indices_counts)
+    pair_counts, pair_to_words = get_pair_counts(pre_token_indices_counts)
+
     while len(vocab) < vocab_size:
         # break ties by choosing the lexicographically greater (e.g. alphabetically pair)
         # which can be determined by the UTF-8 code point, aka the index
@@ -79,12 +80,16 @@ def run_train_bpe(
         merges.append((vocab[index1], vocab[index2]))
         # e.g. 'T' + 'h' -> 'Th'
         vocab[new_index] = vocab[index1] + vocab[index2]
-        # update pre_token_indices_counts and pair_counts
-        _pre_token_indices_counts = {}
-        for indices, word_count in pre_token_indices_counts.items():
-            indices = merge(indices, word_count, pair, new_index, pair_counts)
-            _pre_token_indices_counts[tuple(indices)] = word_count
-        pre_token_indices_counts = _pre_token_indices_counts
+
+        words = pair_to_words.pop(pair)
+        for indices in words:
+            _indices = merge(indices, pair, new_index)
+            word_count = pre_token_indices_counts.pop(indices)
+            pre_token_indices_counts[_indices] = word_count
+            # update the counts for the adjacent pairs to the merged pair
+            update_pair_counts_sub(indices, word_count, pair_counts, pair_to_words)
+            update_pair_counts(_indices, word_count, pair_counts, pair_to_words)
+
         pair_counts.pop(pair)
 
     return vocab, merges
@@ -92,55 +97,36 @@ def run_train_bpe(
 
 def get_pair_counts(pre_token_indices_counts):
     pair_counts = Counter()
+    pair_to_words = defaultdict(set)
     for indices, counts in pre_token_indices_counts.items():
-        for index_pair in zip(indices, indices[1:]):  # For each adjacent pair
-            pair_counts[index_pair] += counts
-    return pair_counts
+        update_pair_counts(indices, counts, pair_counts, pair_to_words)
+    return pair_counts, pair_to_words
 
 
-def merge(
-    indices: list[int], word_count: int, pair: tuple[int, int], new_index: int, pair_counts: dict[tuple[int, int], int]
-) -> list[int]:
-    """Return `indices`, but with all instances of `pair` replaced with `new_index`.
+def update_pair_counts(indices, word_count, pair_counts, pair_to_words):
+    for index_pair in zip(indices, indices[1:]):  # For each adjacent pair
+        pair_counts[index_pair] += word_count
+        pair_to_words[index_pair].add(indices)
 
-    When performing the merge, if there is a matching pair of indices,
-    then the adjacent indices pairs are no longer valid. Need to decrement those pairs
-    and add in 2 new pairs.
-    indices = [w, i, d, e, s, t]
-    pair = (d,e)
-    merged_indices = [w, i, de, s, t]
-    counts[(i,d)] -= 1
-    counts[(e,s)] -= 1
-    counts[(i,de)] += 1
-    counts[(de,s)] += 1
-    """
+
+def update_pair_counts_sub(indices, word_count, pair_counts, pair_to_words):
+    for index_pair in zip(indices, indices[1:]):  # For each adjacent pair
+        pair_counts[index_pair] -= word_count
+        pair_to_words[index_pair] -= {indices}
+
+
+def merge(indices: list[int], pair: tuple[int, int], new_index: int):
+    """Return `indices`, but with all instances of `pair` replaced with `new_index`."""
     new_indices = []
     i = 0
-    just_merged = False
     while i < len(indices):
         if i + 1 < len(indices) and indices[i] == pair[0] and indices[i + 1] == pair[1]:
             new_indices.append(new_index)
-
-            if just_merged:
-                pair_counts[(new_index, new_index)] += word_count
-                # the previous matching merge added this new pair (new_index, indices[i+2]),
-                # that we need to correct now that we have another matching pair
-                pair_counts[(new_index, indices[i])] -= word_count
-            elif i > 0:
-                pair_counts[(indices[i - 1], indices[i])] -= word_count
-                pair_counts[(indices[i - 1], new_index)] += word_count
-
-            if i + 2 < len(indices):
-                pair_counts[(indices[i + 1], indices[i + 2])] -= word_count
-                pair_counts[(new_index, indices[i + 2])] += word_count
-
-            just_merged = True
             i += 2
         else:
             new_indices.append(indices[i])
-            just_merged = False
             i += 1
-    return new_indices
+    return tuple(new_indices)
 
 
 # @dataclass(frozen=True)
