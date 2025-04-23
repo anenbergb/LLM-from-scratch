@@ -21,6 +21,37 @@ Token: ' it', Count: 51670
 """
 
 
+def load_fixtures():
+    import sys, json
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from tests.common import gpt2_bytes_to_unicode
+    FIXTURES_PATH = "/home/bryan/src/LLM-from-scratch/tests/fixtures"
+    # Path to the reference tokenizer vocab and merges
+    reference_vocab_path = os.path.join(FIXTURES_PATH, "train-bpe-reference-vocab.json")
+    reference_merges_path = os.path.join(FIXTURES_PATH, "train-bpe-reference-merges.txt")
+
+    # Compare the learned merges to the expected output merges
+    gpt2_byte_decoder = {v: k for k, v in gpt2_bytes_to_unicode().items()}
+    with open(reference_merges_path) as f:
+        gpt2_reference_merges = [tuple(line.rstrip().split(" ")) for line in f]
+        reference_merges = [
+            (
+                bytes([gpt2_byte_decoder[token] for token in merge_token_1]),
+                bytes([gpt2_byte_decoder[token] for token in merge_token_2]),
+            )
+            for merge_token_1, merge_token_2 in gpt2_reference_merges
+        ]
+
+    # Compare the vocab to the expected output vocab
+    with open(reference_vocab_path) as f:
+        gpt2_reference_vocab = json.load(f)
+        reference_vocab = {
+            gpt2_vocab_index: bytes([gpt2_byte_decoder[token] for token in gpt2_vocab_item])
+            for gpt2_vocab_item, gpt2_vocab_index in gpt2_reference_vocab.items()
+        }
+    return reference_vocab, reference_merges
+
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -48,6 +79,8 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
+    ref_vocab, ref_merges = load_fixtures()
+
     # Load and pretokenize the file
     # dict[str, int] -> int
     pre_token_counts = load_and_pretokenize_file(
@@ -68,12 +101,48 @@ def run_train_bpe(
     }
     pair_counts, pair_to_words = get_pair_counts(pre_token_indices_counts)
 
+    def cmp_function(pair_count):
+        index1, index2 = pair_count[0]
+        count = pair_count[1]
+        bytes1 = vocab[index1]
+        bytes2 = vocab[index2]
+        return (count, bytes1, bytes2)
+        
+
     while len(vocab) < vocab_size:
         # break ties by choosing the lexicographically greater (e.g. alphabetically pair)
-        # which can be determined by the UTF-8 code point, aka the index
+        # which can be determined by the UTF-8 code point
+        # e.g. to compare b" c" and b"t" you compare the first character 
+        # b" " (UTF-8 32) and b"t" (UTF-8 116) and select b"t".
         # x[1] is the freq count of the index pair.
-        pair = max(pair_counts.items(), key=lambda x: (x[1], x[0]))[0]
+        pair = max(pair_counts.items(), key=cmp_function)[0]
         index1, index2 = pair
+        # DEBUGGING
+        my_merge = (vocab[index1], vocab[index2])
+        merge_index = len(merges)
+        ref_merge = ref_merges[merge_index]
+        if my_merge != ref_merge:
+            print(f"{my_merge} | {ref_merge}")
+            reverse_vocab = {v:k for k,v in vocab.items()}
+
+            ref_byte_index1, ref_byte_index2 = ref_merge
+            ref_index1 = reverse_vocab[ref_byte_index1]
+            ref_index2 = reverse_vocab[ref_byte_index2]
+            ref_pair = (ref_index1, ref_index2)
+            ref_pair_count = pair_counts[ref_pair]
+            
+            print(f"my_merge pair_count: {pair_counts[pair]}")
+            print(f"ref_merge pair_count: {ref_pair_count}")
+            sorted_pair_counts = sorted(pair_counts.items(), key=lambda x: (x[1], x[0]), reverse=True)
+            print("Sorted Pairs:")
+            for sorted_pair, counts in sorted_pair_counts[:5]:
+                sorted_pair_bytes = (vocab[sorted_pair[0]], vocab[sorted_pair[1]])
+                print(f"\t{sorted_pair} = {sorted_pair_bytes}\t: {counts}")
+
+            import ipdb
+
+            ipdb.set_trace()
+
         # Merge that pair.
         new_index = len(vocab)
         merges_index[pair] = new_index
@@ -154,16 +223,16 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Tokenize a text file.")
     parser.add_argument(
-        "--file_path",
+        "--file-path",
         type=str,
         default="/media/bryan/ssd01/data/cs336/TinyStoriesV2-GPT4-valid.txt",
         help="Path to the text file to pre-tokenize.",
     )
     parser.add_argument("--vocab-size", type=int, default=500, help="Size of the vocabulary to train.")
     parser.add_argument(
-        "--special_tokens", type=str, nargs="+", default=["<|endoftext|>"], help="List of special tokens."
+        "--special-tokens", type=str, nargs="+", default=["<|endoftext|>"], help="List of special tokens."
     )
-    parser.add_argument("--num_processes", type=int, default=8, help="Number of processes to use.")
+    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to use.")
 
     args = parser.parse_args()
     vocab, merges = run_train_bpe(
