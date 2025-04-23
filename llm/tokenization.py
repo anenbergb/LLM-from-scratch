@@ -20,6 +20,7 @@ Token: ' it', Count: 51670
 
 """
 
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -54,12 +55,13 @@ def run_train_bpe(
         special_tokens=special_tokens,
         num_processes=kwargs.get("num_processes", 32),
     )
-    merges: dict[tuple[int, int], int] = {}  # index1, index2 => merged index
+    merges_index: dict[tuple[int, int], int] = {}  # index1, index2 => merged index
+    merges: list[tuple[bytes, bytes]] = []  # bytes @ index1, bytes @ index2
     vocab: dict[int, bytes] = {x: bytes([x]) for x in range(256)}  # index -> bytes
     # Add special tokens to the vocabulary
     for token in special_tokens:
         vocab[len(vocab)] = token.encode("utf-8")
-    
+
     # ' They' converted to (32, 84, 104, 101, 121)
     pre_token_indices_counts = {
         tuple(map(int, string.encode("utf-8"))): count for string, count in pre_token_counts.items()
@@ -69,19 +71,24 @@ def run_train_bpe(
         # break ties by choosing the lexicographically greater (e.g. alphabetically pair)
         # which can be determined by the UTF-8 code point, aka the index
         # x[1] is the freq count of the index pair.
-        pair = max(pair_counts.items(), key = lambda x: (x[1], x[0]))[0]
+        pair = max(pair_counts.items(), key=lambda x: (x[1], x[0]))[0]
         index1, index2 = pair
         # Merge that pair.
         new_index = len(vocab)
-        merges[pair] = new_index
+        merges_index[pair] = new_index
+        merges.append((vocab[index1], vocab[index2]))
         # e.g. 'T' + 'h' -> 'Th'
         vocab[new_index] = vocab[index1] + vocab[index2]
         # update pre_token_indices_counts and pair_counts
-        # iterate over the pre_token_indices_counts, and apply merge to the indices
-        # this will also update the pair_counts
-        # indices = merge(indices, pair, new_index)
+        _pre_token_indices_counts = {}
+        for indices, word_count in pre_token_indices_counts.items():
+            indices = merge(indices, word_count, pair, new_index, pair_counts)
+            _pre_token_indices_counts[tuple(indices)] = word_count
+        pre_token_indices_counts = _pre_token_indices_counts
+        pair_counts.pop(pair)
 
-    return bpe.vocab, bpe.merges
+    return vocab, merges
+
 
 def get_pair_counts(pre_token_indices_counts):
     pair_counts = Counter()
@@ -91,37 +98,11 @@ def get_pair_counts(pre_token_indices_counts):
     return pair_counts
 
 
-def update_byte_freq_with_max(pre_token_byte_freqs, max_char_pair):
-    pre_token_byte_freqs_updated = {}
-    for char_sequence, freq in pre_token_byte_freqs.items():
-        char_seq_updated = []
-        i = 0
-        while i < len(char_sequence):
-            if i == len(char_sequence) - 1:
-                char_seq_updated.append(char_sequence[i])
-                break
-            char_pair = (char_sequence[i], char_sequence[i+1])        
-            if char_pair == max_char_pair:
-                char_seq_updated.append("".join(max_char_pair))
-                i += 1
-            else:
-                char_seq_updated.append(char_sequence[i])
-            i += 1
-        pre_token_byte_freqs_updated[tuple(char_seq_updated)] = freq
-    return pre_token_byte_freqs_updated
-
-
-
-@dataclass(frozen=True)
-class BPETokenizerParams:
-    """All you need to specify a BPETokenizer."""
-    vocab: dict[int, bytes]     # index -> bytes
-    merges: dict[tuple[int, int], int]  # index1,index2 -> new_index
-
-
-def merge(indices: list[int], pair: tuple[int, int], new_index: int, pair_counts: dict[tuple[int, int], int]) -> list[int]:
+def merge(
+    indices: list[int], word_count: int, pair: tuple[int, int], new_index: int, pair_counts: dict[tuple[int, int], int]
+) -> list[int]:
     """Return `indices`, but with all instances of `pair` replaced with `new_index`.
-    
+
     When performing the merge, if there is a matching pair of indices,
     then the adjacent indices pairs are no longer valid. Need to decrement those pairs
     and add in 2 new pairs.
@@ -141,17 +122,17 @@ def merge(indices: list[int], pair: tuple[int, int], new_index: int, pair_counts
             new_indices.append(new_index)
 
             if just_merged:
-                pair_counts[(new_index, new_index)] += 1
+                pair_counts[(new_index, new_index)] += word_count
                 # the previous matching merge added this new pair (new_index, indices[i+2]),
                 # that we need to correct now that we have another matching pair
-                pair_count[(new_index, indices[i])] -= 1
+                pair_counts[(new_index, indices[i])] -= word_count
             elif i > 0:
-                pair_counts[(indices[i - 1], indices[i])] -= 1
-                pair_counts[(indices[i - 1], new_index)] += 1
-            
+                pair_counts[(indices[i - 1], indices[i])] -= word_count
+                pair_counts[(indices[i - 1], new_index)] += word_count
+
             if i + 2 < len(indices):
-                pair_counts[(indices[i+1], indices[i + 2])] -= 1
-                pair_counts[(new_index, indices[i + 2])] += 1
+                pair_counts[(indices[i + 1], indices[i + 2])] -= word_count
+                pair_counts[(new_index, indices[i + 2])] += word_count
 
             just_merged = True
             i += 2
@@ -161,37 +142,26 @@ def merge(indices: list[int], pair: tuple[int, int], new_index: int, pair_counts
             i += 1
     return new_indices
 
-def train_bpe(string: str, num_merges: int) -> BPETokenizerParams:
-    # Start with the list of bytes of string.
-    indices = list(map(int, string.encode("utf-8"))) 
 
-    for i in range(num_merges):
-        # Count the number of occurrences of each pair of tokens
-        counts = defaultdict(int)
-        for index1, index2 in zip(indices, indices[1:]):  # For each adjacent pair
-            counts[(index1, index2)] += 1  # @inspect counts
-        # Find the most common pair.
-        pair = max(counts, key=counts.get)  # @inspect pair
-        index1, index2 = pair
-        # Merge that pair.
-        new_index = 256 + i  # @inspect new_index
-        merges[pair] = new_index  # @inspect merges
-        vocab[new_index] = vocab[index1] + vocab[index2]  # @inspect vocab
-        indices = merge(indices, pair, new_index)  # @inspect indices
-    return BPETokenizerParams(vocab=vocab, merges=merges)
+# @dataclass(frozen=True)
+# class BPETokenizerParams:
+#     """All you need to specify a BPETokenizer."""
 
-    
+#     vocab: dict[int, bytes]  # index -> bytes
+#     merges: dict[tuple[int, int], int]  # index1,index2 -> new_index
 
-class ByteTokenizer(Tokenizer):
-    """Represent a string as a sequence of bytes."""
-    def encode(self, string: str) -> list[int]:
-        string_bytes = string.encode("utf-8")  # @inspect string_bytes
-        indices = list(map(int, string_bytes))  # @inspect indices
-        return indices
-    def decode(self, indices: list[int]) -> str:
-        string_bytes = bytes(indices)  # @inspect string_bytes
-        string = string_bytes.decode("utf-8")  # @inspect string
-        return string
+# class ByteTokenizer(Tokenizer):
+#     """Represent a string as a sequence of bytes."""
+
+#     def encode(self, string: str) -> list[int]:
+#         string_bytes = string.encode("utf-8")  # @inspect string_bytes
+#         indices = list(map(int, string_bytes))  # @inspect indices
+#         return indices
+
+#     def decode(self, indices: list[int]) -> str:
+#         string_bytes = bytes(indices)  # @inspect string_bytes
+#         string = string_bytes.decode("utf-8")  # @inspect string
+#         return string
 
 if __name__ == "__main__":
     import argparse
@@ -203,9 +173,7 @@ if __name__ == "__main__":
         default="/media/bryan/ssd01/data/cs336/TinyStoriesV2-GPT4-valid.txt",
         help="Path to the text file to pre-tokenize.",
     )
-    parser.add_argument(
-        "--vocab-size", type=int, default=500, help="Size of the vocabulary to train."
-    )
+    parser.add_argument("--vocab-size", type=int, default=500, help="Size of the vocabulary to train.")
     parser.add_argument(
         "--special_tokens", type=str, nargs="+", default=["<|endoftext|>"], help="List of special tokens."
     )
@@ -219,5 +187,5 @@ if __name__ == "__main__":
         num_processes=args.num_processes,
     )
 
-    for token, count in total_pre_token_counts.most_common(10):
-        print(f"Token: {repr(token)}, Count: {count}")
+    for merge_item in merges[:10]:
+        print(f"Merge: {repr(merge_item)}")
