@@ -146,14 +146,6 @@ def merge(indices: list[int], pair: tuple[int, int], new_index: int):
     return tuple(new_indices)
 
 
-# @dataclass(frozen=True)
-# class BPETokenizerParams:
-#     """All you need to specify a BPETokenizer."""
-
-#     vocab: dict[int, bytes]  # index -> bytes
-#     merges: dict[tuple[int, int], int]  # index1,index2 -> new_index
-
-
 class Tokenizer:
     """Given a vocabulary, a list of merges, and a list of special tokens,
     construct a BPE tokenizer that uses the provided vocab, merges, and special tokens.
@@ -172,6 +164,9 @@ class Tokenizer:
     def __init__(
         self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None
     ):
+        max_token_id = max(vocab.keys())
+        assert max_token_id == len(vocab) - 1
+
         special_bytes = [s.encode("utf-8") for s in special_tokens]
         special_tokens_found = set()
         for vocab_bytes in vocab.values():
@@ -179,7 +174,9 @@ class Tokenizer:
                 special_tokens_found.add(vocab_bytes.decode("utf-8"))
         if len(special_tokens) > len(special_tokens_found):
             missing_special_tokens = set(special_tokens) - special_tokens_found
-            raise ValueError(f"special_tokens not found vocab: {missing_special_tokens}")
+            for special_token in missing_special_tokens:
+                print(f"special_token '{special_token}' not found in vocabulary. Adding it now.")
+                vocab[len(vocab)] = special_token.encode("utf-8")
 
         self.bytes2id = {v: k for k, v in vocab.items()}
         self.vocab = vocab
@@ -219,6 +216,32 @@ class Tokenizer:
             token_bytes = token.encode("utf-8")
             yield token_bytes
 
+    def _apply_merges(self, pretoken: bytes) -> list[int]:
+        """
+        Iterate through the self.merges list[tuple[bytes, bytes]] in order
+        and apply any of those merges to pretoken bytes.
+        Return the merged bytes.
+        """
+        # Convert the pretoken bytes into a list UTF-8 ints
+        token = list(pretoken)
+
+        # Iterate through the merges and apply them
+        for merge in self.merges:
+            byte1, byte2 = merge
+            id1 = self.bytes2id[byte1]
+            id2 = self.bytes2id[byte2]
+            merged_id = self.bytes2id[byte1 + byte2]
+            i = 0
+            while i < len(token) - 1:
+                # Check if the current pair matches the merge
+                if token[i] == id1 and token[i + 1] == id2:
+                    # Replace the pair with the merged token
+                    token[i : i + 2] = [merged_id]
+                else:
+                    i += 1
+
+        return token
+
     def encode(self, text: str) -> list[int]:
         """
         Encode an input text into a sequence of token IDs.
@@ -232,9 +255,8 @@ class Tokenizer:
             else:
                 # pre-tokenize. each pretoken is bytes
                 for pretoken in self._pretokenize_iter(document):
-                    print(repr(pretoken))
-                    # apply merges
-
+                    token_ids = self._apply_merges(pretoken)
+                    indices.extend(token_ids)
         return indices
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
