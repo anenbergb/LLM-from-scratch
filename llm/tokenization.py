@@ -158,6 +158,8 @@ class Tokenizer:
             Merges are ordered by order of creation.
         special_tokens (list[str] | None): A list of string special tokens for the tokenizer. These strings will never
             be split into multiple tokens, and will always be kept as a single token.
+            We have to assume that special_tokens is a superset including the special tokens already defined
+            in the vocab
 
     """
 
@@ -167,16 +169,17 @@ class Tokenizer:
         max_token_id = max(vocab.keys())
         assert max_token_id == len(vocab) - 1
 
-        special_bytes = [s.encode("utf-8") for s in special_tokens]
-        special_tokens_found = set()
-        for vocab_bytes in vocab.values():
-            if vocab_bytes in special_bytes:
-                special_tokens_found.add(vocab_bytes.decode("utf-8"))
-        if len(special_tokens) > len(special_tokens_found):
-            missing_special_tokens = set(special_tokens) - special_tokens_found
-            for special_token in missing_special_tokens:
-                print(f"special_token '{special_token}' not found in vocabulary. Adding it now.")
-                vocab[len(vocab)] = special_token.encode("utf-8")
+        if special_tokens is not None:
+            special_bytes = [s.encode("utf-8") for s in special_tokens]
+            special_tokens_found = set()
+            for vocab_bytes in vocab.values():
+                if vocab_bytes in special_bytes:
+                    special_tokens_found.add(vocab_bytes.decode("utf-8"))
+            if len(special_tokens) > len(special_tokens_found):
+                missing_special_tokens = set(special_tokens) - special_tokens_found
+                for special_token in missing_special_tokens:
+                    print(f"special_token '{special_token}' not found in vocabulary. Adding it now.")
+                    vocab[len(vocab)] = special_token.encode("utf-8")
 
         self.bytes2id = {v: k for k, v in vocab.items()}
         self.vocab = vocab
@@ -201,6 +204,8 @@ class Tokenizer:
         return cls(bpe_data["vocab"], bpe_data["merges"], special_tokens)
 
     def _split_on_special_tokens(self, text: str):
+        if self.special_tokens is None:
+            return [text]
         # Escape special characters in tokens and join into a regex pattern
         pattern = "(" + "|".join(map(re.escape, self.special_tokens)) + ")"
         # Split the text while keeping the delimiters
@@ -220,10 +225,10 @@ class Tokenizer:
         """
         Iterate through the self.merges list[tuple[bytes, bytes]] in order
         and apply any of those merges to pretoken bytes.
-        Return the merged bytes.
         """
-        # Convert the pretoken bytes into a list UTF-8 ints
-        token = list(pretoken)
+        # Convert the pretoken bytes into a list bytes
+        token_bytes = [bytes([b]) for b in pretoken]
+        token = [self.bytes2id[b] for b in token_bytes] 
 
         # Iterate through the merges and apply them
         for merge in self.merges:
@@ -247,10 +252,11 @@ class Tokenizer:
         Encode an input text into a sequence of token IDs.
         """
         # pre-tokenize
+        # import pytest; pytest.set_trace()
         documents = self._split_on_special_tokens(text)
         indices = []
         for document in documents:
-            if document in self.special_tokens:
+            if self.special_tokens is not None and document in self.special_tokens:
                 indices.append(self.bytes2id[document.encode("utf-8")])
             else:
                 # pre-tokenize. each pretoken is bytes
@@ -272,8 +278,14 @@ class Tokenizer:
         """
         Decode a sequence of token IDs into text.
         """
-        string_bytes = bytes(ids)  # @inspect string_bytes
-        string = string_bytes.decode("utf-8")  # @inspect string
+        # import pytest; pytest.set_trace()
+        string_bytes = b""
+        for i in ids:
+            # TODO: handle i that isn't in vocabulary
+            if i not in self.vocab:
+                import pytest; pytest.set_trace()
+            string_bytes += self.vocab.get(i, b"")
+        string = string_bytes.decode("utf-8", errors="replace")
         return string
 
 
