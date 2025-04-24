@@ -8,7 +8,7 @@ from typing import BinaryIO
 
 # regex-based pre-tokenizer (used by GPT-2; Radford et al., 2019)
 # from github.com/openai/tiktoken/pull/234/files:
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+PRETOKENIZATION_REGEX = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
 def find_chunk_boundaries(file: BinaryIO, desired_num_chunks: int, split_special_token: bytes) -> list[int]:
@@ -55,7 +55,10 @@ def find_chunk_boundaries(file: BinaryIO, desired_num_chunks: int, split_special
 
 
 def split_text_on_special_tokens(text: str, special_tokens=tuple[str]) -> list[str]:
-    delimiter = re.escape("|".join(special_tokens))
+    """
+    The text is split on the special tokens. The special token are not returned in the result.
+    """
+    delimiter = "|".join(map(re.escape, special_tokens))
     return re.split(delimiter, text)
 
 
@@ -66,7 +69,7 @@ def pretokenize_chunk(text: str, special_tokens: tuple[str]) -> dict[str, int]:
     documents = split_text_on_special_tokens(text, special_tokens)
     pre_token_counts = Counter()
     for document in documents:
-        for token in re.finditer(PAT, document):
+        for token in re.finditer(PRETOKENIZATION_REGEX, document):
             # Extract the token from the match object
             token = token.group(0)
             # Otherwise, add it to the pre-token counts
