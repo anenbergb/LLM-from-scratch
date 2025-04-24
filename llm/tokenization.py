@@ -170,7 +170,7 @@ if __name__ == "__main__":
         "--file-path",
         type=str,
         default="/media/bryan/ssd01/data/cs336/TinyStoriesV2-GPT4-valid.txt",
-        help="Path to the text file to pre-tokenize.",
+        help="Path to the text file to tokenize.",
     )
     parser.add_argument("--vocab-size", type=int, default=500, help="Size of the vocabulary to train.")
     parser.add_argument(
