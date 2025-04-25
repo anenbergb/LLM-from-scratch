@@ -10,6 +10,7 @@ import torch
 from torch import Tensor
 
 from llm.tokenization import run_train_bpe, get_tokenizer
+from llm.layers import Linear
 
 
 
@@ -31,9 +32,9 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
-
+    linear = Linear(d_in, d_out)
+    linear.load_state_dict({"W": weights})
+    return linear.forward(in_features)
 
 def run_embedding(
     vocab_size: int,
