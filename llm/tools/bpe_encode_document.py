@@ -55,9 +55,7 @@ if __name__ == "__main__":
             # Print progress every 100,000 tokens
             if i % 100_000 == 0:
                 elapsed_time = time.time() - start_time
-                print(
-                    f"Processed {i} tokens so far. Time elapsed: {elapsed_time:.2f} seconds. Token list length: {len(token_ids)}"
-                )
+                print(f"Processed {i} tokens so far. Time elapsed: {elapsed_time:.2f} seconds.")
     # Final log
     total_time = time.time() - start_time
     hours, remainder = divmod(total_time, 3600)
