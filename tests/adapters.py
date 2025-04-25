@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 
 from llm.tokenization import run_train_bpe, get_tokenizer
-from llm.layers import Linear, Embedding
+from llm.layers import Linear, Embedding, RMSNorm
 
 
 
@@ -32,7 +32,7 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-    linear = Linear(d_in, d_out)
+    linear = Linear(d_in, d_out, device=weights.device, dtype=weights.dtype)
     linear.load_state_dict({"W": weights})
     return linear.forward(in_features)
 
@@ -54,7 +54,7 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-    embedding = Embedding(vocab_size, d_model)
+    embedding = Embedding(vocab_size, d_model, device=weights.device, dtype=weights.dtype)
     embedding.load_state_dict({"W": weights})
     return embedding.forward(token_ids)
 
@@ -383,7 +383,9 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    norm = RMSNorm(d_model, eps=eps, device=weights.device, dtype=weights.dtype)
+    norm.load_state_dict({"W": weights})
+    return norm.forward(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:

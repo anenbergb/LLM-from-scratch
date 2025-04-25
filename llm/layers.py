@@ -66,3 +66,37 @@ class Embedding(nn.Module):
         """
         assert token_ids.dtype == torch.long, "token_ids must be of type long"
         return self.W[token_ids]
+
+
+class RMSNorm(nn.Module):
+    """
+    RMSNorm layer
+    This function should accept the following parameters:
+    d_model: int hidden dimension of the model
+    eps: float small value to avoid division by zero. numerical stability
+    device:  Device to store the parameters on
+    dtype:  Data type of the parameters
+    """
+
+    def __init__(
+        self, d_model: int, eps: float = 1e-5, device: torch.device | None = None, dtype: torch.dtype | None = None
+    ):
+        super().__init__()
+        self.d_model = d_model
+        # W is the learnable gain
+        self.W = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the RMSNorm layer
+        :param x: Input tensor of shape (batch_size, sequence_length, d_model)
+        :return: Output tensor of shape (batch_size, sequence_length, d_model)
+        """
+        in_dtype = x.dtype
+        x = x.to(torch.float32)
+        mean = torch.mean(x**2, dim=-1, keepdim=True)
+        rms = torch.sqrt(mean + self.eps)
+        x /= rms  # normalize
+        x *= self.W  # apply learnable gain
+        return x.to(in_dtype)
