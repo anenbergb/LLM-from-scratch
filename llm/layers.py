@@ -100,3 +100,68 @@ class RMSNorm(nn.Module):
         x /= rms  # normalize
         x *= self.W  # apply learnable gain
         return x.to(in_dtype)
+
+
+class SwiGLU(nn.Module):
+    """
+    SwiGLU layer
+    This function should accept the following parameters:
+    d_model: int hidden dimension of the model
+    d_ff: int hidden dimension of the feedforward layer
+    device:  Device to store the parameters on
+    dtype:  Data type of the parameters
+
+    SiLU = x * sigmoid(x)
+    GLU = sigmoid(W1 * x) * (W2 * x)
+    SwiGLU(x,W1,W2,W3) = W2 * (SiLU(W1*x) * W3*x)
+
+    x (d_model,)
+    W1 (d_ff, d_model)
+    W3 (d_ff, d_model)
+    W2 (d_model, d_ff)
+
+    d_ff = 8/3 * d_model
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        assert d_model % 64 == 0, "d_model (model hidden dim) must be a multiple of 64"
+        self.d_model = d_model
+        if d_ff is None:
+            d_ff = math.floor((8 / 3) * d_model)
+        self.d_ff = d_ff
+        self.W1 = Linear(d_model, d_ff, device, dtype)
+        self.W2 = Linear(d_ff, d_model, device, dtype)
+        self.W3 = Linear(d_model, d_ff)
+
+    def load_state_dict(self, state_dict: dict[str, torch.Tensor], **kwargs) -> None:
+        """
+        Load state dict for the SwiGLU layer
+        :param state_dict: State dict containing the weights
+        :param strict: Whether to enforce that the keys in state_dict match the keys returned by this module's state_dict()
+        """
+        # Remove W3 from state_dict if it exists
+        assert "W1" in state_dict, "W1 not found in state_dict"
+        assert "W2" in state_dict, "W2 not found in state_dict"
+        assert "W3" in state_dict, "W2 not found in state_dict"
+        self.W1.load_state_dict({"W": state_dict["W1"]}, **kwargs)
+        self.W2.load_state_dict({"W": state_dict["W2"]}, **kwargs)
+        self.W3.load_state_dict({"W": state_dict["W3"]}, **kwargs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the SwiGLU layer
+        :param x: Input tensor of shape (batch_size, in_features)
+        :return: Output tensor of shape (batch_size, out_features)
+        """
+        w1_out = self.W1(x)
+        w3_out = self.W3(x)
+        silu_out = w1_out * torch.sigmoid(w1_out)
+        out = self.W2(silu_out * w3_out)
+        return out
