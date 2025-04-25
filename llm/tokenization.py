@@ -206,13 +206,11 @@ class Tokenizer:
     def _split_on_special_tokens(self, text: str):
         if self.special_tokens is None:
             return [text]
-        # Escape special characters in tokens and join into a regex pattern
-        pattern = "(" + "|".join(map(re.escape, self.special_tokens)) + ")"
-        # Split the text while keeping the delimiters
+        # Sort by descending length to prioritize longer (overlapping) matches
+        sorted_tokens = sorted(self.special_tokens, key=len, reverse=True)
+        pattern = "(" + "|".join(map(re.escape, sorted_tokens)) + ")"
         chunks = re.split(pattern, text)
-        # Optionally remove empty strings (e.g., from split at the beginning)
-        chunks = [chunk for chunk in chunks if chunk]
-        return chunks
+        return [chunk for chunk in chunks if chunk]
 
     def _pretokenize_iter(self, text: str):
         for token in re.finditer(PRETOKENIZATION_REGEX, text):
@@ -228,7 +226,7 @@ class Tokenizer:
         """
         # Convert the pretoken bytes into a list bytes
         token_bytes = [bytes([b]) for b in pretoken]
-        token = [self.bytes2id[b] for b in token_bytes] 
+        token = [self.bytes2id[b] for b in token_bytes]
 
         # Iterate through the merges and apply them
         for merge in self.merges:
@@ -252,7 +250,6 @@ class Tokenizer:
         Encode an input text into a sequence of token IDs.
         """
         # pre-tokenize
-        # import pytest; pytest.set_trace()
         documents = self._split_on_special_tokens(text)
         indices = []
         for document in documents:
@@ -269,22 +266,30 @@ class Tokenizer:
         """
         Given an iterable of strings (e.g., a Python file handle),
         return a generator that lazily yields token IDs.
-        This is required for memory-eﬀicient tokenization of large files
+        This is required for memory-efficient tokenization of large files
         that we cannot directly load into memory.
         """
-        return NotImplementedError
+        for text in iterable:
+            # Split the text on special tokens
+            documents = self._split_on_special_tokens(text)
+            for document in documents:
+                if self.special_tokens is not None and document in self.special_tokens:
+                    # Yield the token ID for special tokens
+                    yield self.bytes2id[document.encode("utf-8")]
+                else:
+                    # Pre-tokenize and apply merges for non-special tokens
+                    for pretoken in self._pretokenize_iter(document):
+                        token_ids = self._apply_merges(pretoken)
+                        for token_id in token_ids:
+                            yield token_id
 
     def decode(self, ids: list[int]) -> str:
         """
         Decode a sequence of token IDs into text.
         """
-        # import pytest; pytest.set_trace()
         string_bytes = b""
         for i in ids:
-            # TODO: handle i that isn't in vocabulary
-            if i not in self.vocab:
-                import pytest; pytest.set_trace()
-            string_bytes += self.vocab.get(i, b"")
+            string_bytes += self.vocab.get(i, b"\xff")
         string = string_bytes.decode("utf-8", errors="replace")
         return string
 
@@ -354,10 +359,7 @@ if __name__ == "__main__":
 
     print("Encoding document...")
     encoded_document = tokenizer.encode(document)
-    import ipdb
-
-    ipdb.set_trace()
     print("Decoding document...")
-    decoded_document = tokenizer.decode(document)
-
-    print("Comparing before and after")
+    decoded_document = tokenizer.decode(encoded_document)
+    assert document == decoded_document
+    print("Encoded -> Decoded document matches the original")
