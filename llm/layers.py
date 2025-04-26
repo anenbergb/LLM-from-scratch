@@ -146,22 +146,72 @@ class SwiGLU(nn.Module):
         :param state_dict: State dict containing the weights
         :param strict: Whether to enforce that the keys in state_dict match the keys returned by this module's state_dict()
         """
-        # Remove W3 from state_dict if it exists
-        assert "W1" in state_dict, "W1 not found in state_dict"
-        assert "W2" in state_dict, "W2 not found in state_dict"
-        assert "W3" in state_dict, "W2 not found in state_dict"
-        self.W1.load_state_dict({"W": state_dict["W1"]}, **kwargs)
-        self.W2.load_state_dict({"W": state_dict["W2"]}, **kwargs)
-        self.W3.load_state_dict({"W": state_dict["W3"]}, **kwargs)
+        for Wnum in ["W1", "W2", "W3"]:
+            assert Wnum in state_dict, f"{Wnum} not found in state_dict"
+            getattr(self, Wnum).load_state_dict({"W": state_dict[Wnum]}, **kwargs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the SwiGLU layer
         :param x: Input tensor of shape (batch_size, in_features)
         :return: Output tensor of shape (batch_size, out_features)
+        SwiGLU(x,W1,W2,W3) = W2 * (SiLU(W1*x) * W3*x)
         """
         w1_out = self.W1(x)
         w3_out = self.W3(x)
         silu_out = w1_out * torch.sigmoid(w1_out)
         out = self.W2(silu_out * w3_out)
         return out
+
+
+class RotaryPositionalEmbedding(nn.Module):
+    """
+    theta: float theta value for the RoPE
+    d_k: int dimension of query and key vectors
+    max_seq_len: int, maximum sequence length that will be inputted
+    device: device to store the buffer on
+
+    We precompute the cosine and sine values for every possible token position from
+    0 to max_seq_len - 1 because we need to apply a position-dependent rotation
+    to each query/key vector at each position in the sequence.
+    * for every position (0, 1, 2, ..., max_seq_len-1),
+    * for every dimension (in pairs of 2, because rotations are 2D),
+    sin_tensor or cos_tensor shape (max_seq_len, d_k)
+    """
+
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device: torch.device | None = None):
+        super().__init__()
+        assert d_k % 2 == 0
+        dk2 = d_k // 2
+        k = torch.arange(1, dk2 + 1, device=device, dtype=torch.float32)
+        theta_scale = 1.0 / (theta ** (2 * k / d_k))
+        seq_indices = torch.arange(max_seq_len, device=device, dtype=torch.float32)
+        # theta_ik of shape (max_seq_len, d_k //2)
+        theta_ik = seq_indices.view(len(seq_indices), 1) * theta_scale.view(1, len(theta_scale))
+        cos_tensor = torch.cos(theta_ik)
+        sin_tensor = torch.sin(theta_ik)
+        self.register_buffer("cos", cos_tensor, persistent=False)
+        self.register_buffer("sin", sin_tensor, persistent=False)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        """
+        Process an input tensor of shape (..., seq_len, d_k) and return a tensor of the same shape. Note
+        that you should tolerate x with an arbitrary number of batch dimensions. You should assume
+        that the token positions are a tensor of shape (..., seq_len) specifying the token positions of
+        x along the sequence dimension.
+        You should use the token positions to slice your (possibly precomputed) cos and sin tensors along
+        the sequence dimension.
+        """
+        cos = self.cos[token_positions]  # (...,seq_len, d_k // 2)
+        sin = self.sin[token_positions]
+
+        # interleave the final dimension, so it's [cos_0, cos_0, cos_1, cos_1, ..., cos_d/2, cos_d/2]
+        cos_expanded = torch.repeat_interleave(cos, 2, dim=-1)  # (..., seq_len, d_k)
+        sin_expanded = torch.repeat_interleave(sin, 2, dim=-1)  # (..., seq_len, d_k)
+
+        # transform [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] to [-1, 0, -3, 2, -5, 4, -7, 6, -9, 8]
+        x_neg_shift = torch.empty_like(x)
+        x_neg_shift[1::2] = x[::2]
+        x_neg_shift[::2] = -x[1::2]
+        result = x * cos_expanded + x_neg_shift * sin_expanded
+        return result

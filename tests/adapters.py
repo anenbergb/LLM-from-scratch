@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 
 from llm.tokenization import run_train_bpe, get_tokenizer
-from llm.layers import Linear, Embedding, RMSNorm, SwiGLU
+from llm.layers import Linear, Embedding, RMSNorm, SwiGLU, RotaryPositionalEmbedding
 
 
 
@@ -200,7 +200,7 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    return RotaryPositionalEmbedding(theta, d_k, max_seq_len, device = in_query_or_key.device)(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
