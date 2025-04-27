@@ -2,6 +2,8 @@ import torch
 from torch import nn
 from einops import einsum
 import math
+from jaxtyping import Float, Int
+from torch import Tensor
 
 
 class Linear(nn.Module):
@@ -220,3 +222,23 @@ class RotaryPositionalEmbedding(nn.Module):
         # x_neg_shift[..., 1::2] = x[..., ::2]
         # x_neg_shift[..., ::2] = -x[..., 1::2]
         return x * cos_expanded + x_neg_shift * sin_expanded
+
+
+def softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
+    """
+    Given a tensor of inputs, return the output of softmaxing the given `dim`
+    of the input.
+
+    Args:
+        in_features (Float[Tensor, "..."]): Input features to softmax. Shape is arbitrary.
+        dim (int): Dimension of the `in_features` to apply softmax to.
+
+    Returns:
+        Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
+        softmax normalizing the specified `dim`.
+    """
+    max_along_dim = torch.max(in_features, dim=dim, keepdim=True).values
+    in_features_submax = in_features - max_along_dim
+    exp = torch.exp(in_features_submax)
+    sum_exp = torch.sum(exp, dim=dim, keepdim=True)
+    return exp / sum_exp
