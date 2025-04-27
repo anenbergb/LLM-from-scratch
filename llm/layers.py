@@ -183,7 +183,7 @@ class RotaryPositionalEmbedding(nn.Module):
         super().__init__()
         assert d_k % 2 == 0
         dk2 = d_k // 2
-        k = torch.arange(1, dk2 + 1, device=device, dtype=torch.float32)
+        k = torch.arange(dk2, device=device, dtype=torch.float32)
         theta_scale = 1.0 / (theta ** (2 * k / d_k))
         seq_indices = torch.arange(max_seq_len, device=device, dtype=torch.float32)
         # theta_ik of shape (max_seq_len, d_k //2)
@@ -210,8 +210,13 @@ class RotaryPositionalEmbedding(nn.Module):
         sin_expanded = torch.repeat_interleave(sin, 2, dim=-1)  # (..., seq_len, d_k)
 
         # transform [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] to [-1, 0, -3, 2, -5, 4, -7, 6, -9, 8]
-        x_neg_shift = torch.empty_like(x)
-        x_neg_shift[1::2] = x[::2]
-        x_neg_shift[::2] = -x[1::2]
-        result = x * cos_expanded + x_neg_shift * sin_expanded
-        return result
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+        # (..., seq_len, d_k/2) stacked to (...,seq_len, d_k/2, 2)
+        # reshape will interleave the -x2 and x1.
+        x_neg_shift = torch.stack((-x2, x1), dim=-1).reshape_as(x)
+        # Equivalent to
+        # x_neg_shift = torch.empty_like(x)
+        # x_neg_shift[..., 1::2] = x[..., ::2]
+        # x_neg_shift[..., ::2] = -x[..., 1::2]
+        return x * cos_expanded + x_neg_shift * sin_expanded
