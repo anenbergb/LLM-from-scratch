@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from einops import einsum
 import math
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Bool
 from torch import Tensor
 
 
@@ -242,3 +242,35 @@ def softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ...
     exp = torch.exp(in_features_submax)
     sum_exp = torch.sum(exp, dim=dim, keepdim=True)
     return exp / sum_exp
+
+
+def scaled_dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys d_k"],
+    V: Float[Tensor, " ... values d_v"],
+    mask: Bool[Tensor, " ... queries keys"] | None = None,
+) -> Float[Tensor, " ... queries d_v"]:
+    """
+    Given key (K), query (Q), and value (V) tensors, return
+    the output of your scaled dot product attention implementation.
+
+    Args:
+        Q (Float[Tensor, " ... queries d_k"]): Query tensor
+        K (Float[Tensor, " ... keys d_k"]): Key tensor
+        V (Float[Tensor, " ... values d_v"]): Values tensor
+        mask (Float[Tensor, " ... queries keys"] | None): Mask tensor
+            This should be a boolean tensor where
+                - `True` indicates that this token should be attended to (not masked)
+                  The attention probabilities of positions with a mask value of True should collectively sum to 1.
+                - `False` indicates that this token should not be attended to (masked)
+                  The attention probabilities of positions with a mask value of False should be set to 0.
+    Returns:
+        Float[Tensor, " ... queries d_v"]: Output of SDPA
+    """
+    d_k = Q.shape[-1]
+    scores = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")  # Q @ K^T
+    scores /= math.sqrt(d_k)
+    if mask is not None:
+        scores += ~mask * -1e9
+    attention_weights = softmax(scores, dim=-1)
+    return einsum(attention_weights, V, "... queries keys, ... keys d_v -> ... queries d_v")

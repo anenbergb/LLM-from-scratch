@@ -12,7 +12,10 @@ from torch import Tensor
 from llm.tokenization import run_train_bpe, get_tokenizer
 from llm.layers import Linear, Embedding, RMSNorm, SwiGLU, RotaryPositionalEmbedding
 
-from llm.layers import softmax as run_softmax
+from llm.layers import (
+    softmax as run_softmax,
+    scaled_dot_product_attention as run_scaled_dot_product_attention,
+)
 
 def run_linear(
     d_in: int,
@@ -84,27 +87,6 @@ def run_swiglu(
     swiglu = SwiGLU(d_model, d_ff, device=w1_weight.device, dtype=w1_weight.dtype)
     swiglu.load_state_dict({"W1": w1_weight, "W2": w2_weight, "W3": w3_weight})
     return swiglu.forward(in_features)
-
-
-def run_scaled_dot_product_attention(
-    Q: Float[Tensor, " ... queries d_k"],
-    K: Float[Tensor, " ... keys d_k"],
-    V: Float[Tensor, " ... values d_v"],
-    mask: Float[Tensor, " ... queries keys"] | None = None,
-) -> Float[Tensor, " ... queries d_v"]:
-    """
-    Given key (K), query (Q), and value (V) tensors, return
-    the output of your scaled dot product attention implementation.
-
-    Args:
-        Q (Float[Tensor, " ... queries d_k"]): Query tensor
-        K (Float[Tensor, " ... keys d_k"]): Key tensor
-        V (Float[Tensor, " ... values d_v"]): Values tensor
-        mask (Float[Tensor, " ... queries keys"] | None): Mask tensor
-    Returns:
-        Float[Tensor, " ... queries d_v"]: Output of SDPA
-    """
-    raise NotImplementedError
 
 
 def run_multihead_self_attention(
