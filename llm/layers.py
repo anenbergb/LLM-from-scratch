@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from einops import einsum
+from einops import einsum, rearrange
 import math
 from jaxtyping import Float, Int, Bool
 from torch import Tensor
@@ -271,6 +271,88 @@ def scaled_dot_product_attention(
     scores = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")  # Q @ K^T
     scores /= math.sqrt(d_k)
     if mask is not None:
-        scores += ~mask * -1e9
+        scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
     attention_weights = softmax(scores, dim=-1)
     return einsum(attention_weights, V, "... queries keys, ... keys d_v -> ... queries d_v")
+
+
+class CausalMHSA(nn.Module):
+    """
+    Causal multi-headed self-attention layer.
+    Args:
+        d_model (int): Dimensionality of the feedforward input and output.
+        num_heads (int): Number of heads to use in multi-headed attention.
+
+    Wq (h*d_k, d_model)
+    Wk (h*d_k, d_model)
+    Wv (h*d_v, d_model)
+    Wo (d_model, h*d_v)
+
+    let d_k = d_v = d_in = d_model / num_heads
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+    ):
+        super().__init__()
+        assert d_model % num_heads == 0
+
+        # query, key, value projections for all heads, but in a batch
+        self.qkv_proj = Linear(d_model, d_model * 3)
+        # output projection
+        self.output_proj = Linear(d_model, d_model)
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_size = d_model // num_heads
+
+    def forward(
+        self,
+        in_features: Float[Tensor, " ... sequence_length d_in"],
+    ):
+        """
+        Forward pass for the attention mechanism.
+
+        Args:
+            in_features (Float[Tensor, "... sequence_length d_in"]): input tensor
+
+        Returns:
+            Float[Tensor, " ... sequence_length d_out"]: Output tensor after applying attention.
+        """
+        qkv = self.qkv_proj(in_features)  # (..., sequence_length, 3*d_model)
+        q, k, v = qkv.split(self.d_model, dim=-1)  # (..., T, d_model) x 3
+
+        k = rearrange(
+            k,
+            "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
+            head_size=self.head_size,
+            num_heads=self.num_heads,
+        )
+        q = rearrange(
+            q,
+            "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
+            head_size=self.head_size,
+            num_heads=self.num_heads,
+        )
+        v = rearrange(
+            v,
+            "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
+            head_size=self.head_size,
+            num_heads=self.num_heads,
+        )
+
+        # (..., queries, keys)
+        # boolean mask of shape (..., queries, keys), which in thise case is
+        # (..., sequence_length, sequence_length)
+        sequence_length = in_features.shape[-2]
+        causal_mask = torch.tril(torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool))
+        attention = scaled_dot_product_attention(q, k, v, causal_mask)  # (B, nh, seq_len, head_size)
+
+        attention = rearrange(
+            attention, "batch num_heads sequence_length head_size -> batch sequence_length (num_heads head_size)"
+        )
+        # output projection
+        out = self.output_proj(attention)
+        return out
