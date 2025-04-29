@@ -197,6 +197,9 @@ class RotaryPositionalEmbedding(nn.Module):
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
         """
+        x: (..., seq_len, d_k)
+        token_positions: (..., seq_len)
+
         Process an input tensor of shape (..., seq_len, d_k) and return a tensor of the same shape. Note
         that you should tolerate x with an arbitrary number of batch dimensions. You should assume
         that the token positions are a tensor of shape (..., seq_len) specifying the token positions of
@@ -342,6 +345,101 @@ class CausalMHSA(nn.Module):
             head_size=self.head_size,
             num_heads=self.num_heads,
         )
+
+        # (..., queries, keys)
+        # boolean mask of shape (..., queries, keys), which in thise case is
+        # (..., sequence_length, sequence_length)
+        sequence_length = in_features.shape[-2]
+        causal_mask = torch.tril(torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool))
+        attention = scaled_dot_product_attention(q, k, v, causal_mask)  # (B, nh, seq_len, head_size)
+
+        attention = rearrange(
+            attention, "batch num_heads sequence_length head_size -> batch sequence_length (num_heads head_size)"
+        )
+        # output projection
+        out = self.output_proj(attention)
+        return out
+
+
+class CausalMHSARoPE(nn.Module):
+    """
+    Causal multi-headed self-attention layer with RoPE
+    Args:
+        d_model (int): Dimensionality of the feedforward input and output.
+        num_heads (int): Number of heads to use in multi-headed attention.
+        max_seq_len (int): Maximum sequence length to pre-cache if your implementation does that.
+        theta (float): RoPE parameter.
+
+    Wq (h*d_k, d_model)
+    Wk (h*d_k, d_model)
+    Wv (h*d_v, d_model)
+    Wo (d_model, h*d_v)
+
+    let d_k = d_v = d_in = d_model / num_heads
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        max_seq_len: int,
+        theta: float,
+    ):
+        super().__init__()
+        assert d_model % num_heads == 0
+
+        # query, key, value projections for all heads, but in a batch
+        self.qkv_proj = Linear(d_model, d_model * 3)
+        # output projection
+        self.output_proj = Linear(d_model, d_model)
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_size = d_model // num_heads
+
+        self.RoPE = RotaryPositionalEmbedding(theta, self.head_size, max_seq_len)
+
+    def forward(
+        self,
+        in_features: Float[Tensor, " ... sequence_length d_in"],
+        token_positions: Int[Tensor, " ... sequence_length"] | None = None,
+    ):
+        """
+        Forward pass for the attention mechanism.
+
+        Args:
+            in_features (Float[Tensor, "... sequence_length d_in"]): input tensor
+
+        Returns:
+            Float[Tensor, " ... sequence_length d_out"]: Output tensor after applying attention.
+        """
+        qkv = self.qkv_proj(in_features)  # (..., sequence_length, 3*d_model)
+        q, k, v = qkv.split(self.d_model, dim=-1)  # (..., T, d_model) x 3
+
+        k = rearrange(
+            k,
+            "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
+            head_size=self.head_size,
+            num_heads=self.num_heads,
+        )
+        q = rearrange(
+            q,
+            "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
+            head_size=self.head_size,
+            num_heads=self.num_heads,
+        )
+        v = rearrange(
+            v,
+            "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
+            head_size=self.head_size,
+            num_heads=self.num_heads,
+        )
+
+        if token_positions is None:
+            # (1, 1, sequence_length)
+            token_positions = torch.arange(in_features.shape[-2], device=in_features.device).view((1, 1, -1))
+        q = self.RoPE(q, token_positions)
+        k = self.RoPE(k, token_positions)
 
         # (..., queries, keys)
         # boolean mask of shape (..., queries, keys), which in thise case is

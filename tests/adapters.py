@@ -14,7 +14,8 @@ from llm.layers import (
     Linear, Embedding, RMSNorm, SwiGLU, RotaryPositionalEmbedding,
     softmax as run_softmax,
     scaled_dot_product_attention as run_scaled_dot_product_attention,
-    CausalMHSA
+    CausalMHSA,
+    CausalMHSARoPE
 )
 
 def run_linear(
@@ -164,7 +165,11 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    mhsa = CausalMHSARoPE(d_model, num_heads, max_seq_len, theta)
+    qkv_proj_weight = torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0)
+    mhsa.qkv_proj.load_state_dict({"W": qkv_proj_weight})
+    mhsa.output_proj.load_state_dict({"W": o_proj_weight})
+    return mhsa.forward(in_features, token_positions)
 
 
 def run_rope(
