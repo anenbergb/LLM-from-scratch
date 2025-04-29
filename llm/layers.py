@@ -22,10 +22,10 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.W = nn.Parameter(torch.empty((out_features, in_features), device=device, dtype=dtype))
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), device=device, dtype=dtype))
         variance = 2 / (in_features + out_features)
         std = math.sqrt(variance)
-        nn.init.trunc_normal_(self.W, mean=0.0, std=std, a=-3 * std, b=3 * std)
+        nn.init.trunc_normal_(self.weight, mean=0.0, std=std, a=-3 * std, b=3 * std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -33,7 +33,7 @@ class Linear(nn.Module):
         :param x: Input tensor of shape (batch_size, in_features)
         :return: Output tensor of shape (batch_size, out_features)
         """
-        return einsum(x, self.W, "... d_in, d_out d_in -> ... d_out")
+        return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
 
 
 class Embedding(nn.Module):
@@ -57,8 +57,8 @@ class Embedding(nn.Module):
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         # W is (num_embeddings, d_model)
-        self.W = nn.Parameter(torch.empty((num_embeddings, embedding_dim), device=device, dtype=dtype))
-        nn.init.trunc_normal_(self.W, mean=0.0, std=1, a=-3, b=3)
+        self.weight = nn.Parameter(torch.empty((num_embeddings, embedding_dim), device=device, dtype=dtype))
+        nn.init.trunc_normal_(self.weight, mean=0.0, std=1, a=-3, b=3)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -67,7 +67,7 @@ class Embedding(nn.Module):
         :return: Output tensor of shape (batch_size, sequence_length, embedding_dim)
         """
         assert token_ids.dtype == torch.long, "token_ids must be of type long"
-        return self.W[token_ids]
+        return self.weight[token_ids]
 
 
 class RMSNorm(nn.Module):
@@ -86,7 +86,7 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.d_model = d_model
         # W is the learnable gain
-        self.W = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
+        self.weight = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -100,7 +100,7 @@ class RMSNorm(nn.Module):
         mean = torch.mean(x**2, dim=-1, keepdim=True)
         rms = torch.sqrt(mean + self.eps)
         x /= rms  # normalize
-        x *= self.W  # apply learnable gain
+        x *= self.weight  # apply learnable gain
         return x.to(in_dtype)
 
 
@@ -147,9 +147,9 @@ class SwiGLU(nn.Module):
         if d_ff is None:
             d_ff = math.floor((8 / 3) * d_model)
         self.d_ff = d_ff
-        self.W1 = Linear(d_model, d_ff, device, dtype)
-        self.W2 = Linear(d_ff, d_model, device, dtype)
-        self.W3 = Linear(d_model, d_ff)
+        self.w1 = Linear(d_model, d_ff, device, dtype)
+        self.w2 = Linear(d_ff, d_model, device, dtype)
+        self.w3 = Linear(d_model, d_ff)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -158,10 +158,10 @@ class SwiGLU(nn.Module):
         :return: Output tensor of shape (batch_size, out_features)
         SwiGLU(x,W1,W2,W3) = W2 * (SiLU(W1*x) * W3*x)
         """
-        w1_out = self.W1(x)
-        w3_out = self.W3(x)
+        w1_out = self.w1(x)
+        w3_out = self.w3(x)
         silu_out = w1_out * torch.sigmoid(w1_out)
-        out = self.W2(silu_out * w3_out)
+        out = self.w2(silu_out * w3_out)
         return out
 
 

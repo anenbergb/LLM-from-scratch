@@ -44,7 +44,7 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
     linear = Linear(d_in, d_out, device=weights.device, dtype=weights.dtype)
-    linear.load_state_dict({"W": weights})
+    linear.load_state_dict({"weight": weights})
     return linear(in_features)
 
 
@@ -67,7 +67,7 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
     embedding = Embedding(vocab_size, d_model, device=weights.device, dtype=weights.dtype)
-    embedding.load_state_dict({"W": weights})
+    embedding.load_state_dict({"weight": weights})
     return embedding(token_ids)
 
 
@@ -94,7 +94,7 @@ def run_swiglu(
         Float[Tensor, "... d_model"]: Output embeddings of the same shape as the input embeddings.
     """
     swiglu = SwiGLU(d_model, d_ff, device=w1_weight.device, dtype=w1_weight.dtype)
-    swiglu.load_state_dict({"W1.W": w1_weight, "W2.W": w2_weight, "W3.W": w3_weight})
+    swiglu.load_state_dict({"w1.weight": w1_weight, "w2.weight": w2_weight, "w3.weight": w3_weight})
     return swiglu(in_features)
 
 
@@ -131,7 +131,7 @@ def run_multihead_self_attention(
     """
     mhsa = CausalMHSA(d_model, num_heads)
     qkv_proj_weight = torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0)
-    mhsa.load_state_dict({"qkv_proj.W": qkv_proj_weight, "output_proj.W": o_proj_weight})
+    mhsa.load_state_dict({"qkv_proj.weight": qkv_proj_weight, "output_proj.weight": o_proj_weight})
     return mhsa(in_features)
 
 
@@ -174,7 +174,7 @@ def run_multihead_self_attention_with_rope(
     """
     mhsa = CausalMHSARoPE(d_model, num_heads, max_seq_len, theta)
     qkv_proj_weight = torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0)
-    mhsa.load_state_dict({"qkv_proj.W": qkv_proj_weight, "output_proj.W": o_proj_weight})
+    mhsa.load_state_dict({"qkv_proj.weight": qkv_proj_weight, "output_proj.weight": o_proj_weight})
     return mhsa(in_features, token_positions)
 
 
@@ -283,17 +283,11 @@ def run_transformer_block(
         ],
         dim=0,
     )
-
-    weights_dict = {
-        "attn.qkv_proj.W": qkv_proj_weight,
-        "attn.output_proj.W": weights["attn.output_proj.weight"],
-        "norm1.W": weights["ln1.weight"],
-        "ffn.W1.W": weights["ffn.w1.weight"],
-        "ffn.W2.W": weights["ffn.w2.weight"],
-        "ffn.W3.W": weights["ffn.w3.weight"],
-        "norm2.W": weights["ln2.weight"],
-    }
-    block.load_state_dict(weights_dict)
+    weights.pop("attn.q_proj.weight")
+    weights.pop("attn.k_proj.weight")
+    weights.pop("attn.v_proj.weight")
+    weights["attn.qkv_proj.weight"] = qkv_proj_weight
+    block.load_state_dict(weights)
     return block.forward(in_features)
 
 
@@ -400,7 +394,7 @@ def run_rmsnorm(
         RMSNorm of the `in_features`.
     """
     norm = RMSNorm(d_model, eps=eps, device=weights.device, dtype=weights.dtype)
-    norm.load_state_dict({"W": weights})
+    norm.load_state_dict({"weight": weights})
     return norm.forward(in_features)
 
 

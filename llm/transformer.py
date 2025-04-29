@@ -33,8 +33,8 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.attn = CausalMHSARoPE(d_model, num_heads, max_seq_len, theta, device=device, dtype=dtype)
         self.ffn = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
-        self.norm1 = RMSNorm(d_model, device=device, dtype=dtype)
-        self.norm2 = RMSNorm(d_model, device=device, dtype=dtype)
+        self.ln1 = RMSNorm(d_model, device=device, dtype=dtype)
+        self.ln2 = RMSNorm(d_model, device=device, dtype=dtype)
 
     def forward(
         self,
@@ -48,6 +48,6 @@ class TransformerBlock(nn.Module):
         Returns:
             Output tensor of the same shape as in_features.
         """
-        out = in_features + self.attn(self.norm1(in_features), token_positions)
-        out = out + self.ffn(self.norm2(out))
+        out = in_features + self.attn(self.ln1(in_features), token_positions)
+        out = out + self.ffn(self.ln2(out))
         return out
