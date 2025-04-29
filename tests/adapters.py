@@ -11,12 +11,19 @@ from torch import Tensor
 
 from llm.tokenization import run_train_bpe, get_tokenizer
 from llm.layers import (
-    Linear, Embedding, RMSNorm, SwiGLU, RotaryPositionalEmbedding,
+    Linear,
+    Embedding,
+    RMSNorm,
+    SiLU,
+    SwiGLU,
+    RotaryPositionalEmbedding,
     softmax as run_softmax,
     scaled_dot_product_attention as run_scaled_dot_product_attention,
     CausalMHSA,
-    CausalMHSARoPE
+    CausalMHSARoPE,
 )
+from llm.transformer import TransformerBlock
+
 
 def run_linear(
     d_in: int,
@@ -32,13 +39,14 @@ def run_linear(
         out_dim (int): The size of the output dimension
         weights (Float[Tensor, "d_out d_in"]): The linear weights to use
         in_features (Float[Tensor, "... d_in"]): The output tensor to apply the function to
-    
+
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
     linear = Linear(d_in, d_out, device=weights.device, dtype=weights.dtype)
     linear.load_state_dict({"W": weights})
-    return linear.forward(in_features)
+    return linear(in_features)
+
 
 def run_embedding(
     vocab_size: int,
@@ -54,13 +62,13 @@ def run_embedding(
         d_model (int): The size of the embedding dimension
         weights (Float[Tensor, "vocab_size d_model"]): The embedding vectors to fetch from
         token_ids (Int[Tensor, "..."]): The set of token ids to fetch from the Embedding layer
-    
+
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
     embedding = Embedding(vocab_size, d_model, device=weights.device, dtype=weights.dtype)
     embedding.load_state_dict({"W": weights})
-    return embedding.forward(token_ids)
+    return embedding(token_ids)
 
 
 def run_swiglu(
@@ -86,8 +94,8 @@ def run_swiglu(
         Float[Tensor, "... d_model"]: Output embeddings of the same shape as the input embeddings.
     """
     swiglu = SwiGLU(d_model, d_ff, device=w1_weight.device, dtype=w1_weight.dtype)
-    swiglu.load_state_dict({"W1": w1_weight, "W2": w2_weight, "W3": w3_weight})
-    return swiglu.forward(in_features)
+    swiglu.load_state_dict({"W1.W": w1_weight, "W2.W": w2_weight, "W3.W": w3_weight})
+    return swiglu(in_features)
 
 
 def run_multihead_self_attention(
@@ -123,9 +131,8 @@ def run_multihead_self_attention(
     """
     mhsa = CausalMHSA(d_model, num_heads)
     qkv_proj_weight = torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0)
-    mhsa.qkv_proj.load_state_dict({"W": qkv_proj_weight})
-    mhsa.output_proj.load_state_dict({"W": o_proj_weight})
-    return mhsa.forward(in_features)
+    mhsa.load_state_dict({"qkv_proj.W": qkv_proj_weight, "output_proj.W": o_proj_weight})
+    return mhsa(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -167,9 +174,8 @@ def run_multihead_self_attention_with_rope(
     """
     mhsa = CausalMHSARoPE(d_model, num_heads, max_seq_len, theta)
     qkv_proj_weight = torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0)
-    mhsa.qkv_proj.load_state_dict({"W": qkv_proj_weight})
-    mhsa.output_proj.load_state_dict({"W": o_proj_weight})
-    return mhsa.forward(in_features, token_positions)
+    mhsa.load_state_dict({"qkv_proj.W": qkv_proj_weight, "output_proj.W": o_proj_weight})
+    return mhsa(in_features, token_positions)
 
 
 def run_rope(
@@ -191,7 +197,9 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    return RotaryPositionalEmbedding(theta, d_k, max_seq_len, device = in_query_or_key.device)(in_query_or_key, token_positions)
+    return RotaryPositionalEmbedding(theta, d_k, max_seq_len, device=in_query_or_key.device)(
+        in_query_or_key, token_positions
+    )
 
 
 def run_transformer_block(
@@ -264,7 +272,29 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    block = TransformerBlock(
+        d_model, num_heads, d_ff, max_seq_len, theta, device=in_features.device, dtype=in_features.dtype
+    )
+    qkv_proj_weight = torch.cat(
+        [
+            weights["attn.q_proj.weight"],
+            weights["attn.k_proj.weight"],
+            weights["attn.v_proj.weight"],
+        ],
+        dim=0,
+    )
+
+    weights_dict = {
+        "attn.qkv_proj.W": qkv_proj_weight,
+        "attn.output_proj.W": weights["attn.output_proj.weight"],
+        "norm1.W": weights["ln1.weight"],
+        "ffn.W1.W": weights["ffn.w1.weight"],
+        "ffn.W2.W": weights["ffn.w2.weight"],
+        "ffn.W3.W": weights["ffn.w3.weight"],
+        "norm2.W": weights["ln2.weight"],
+    }
+    block.load_state_dict(weights_dict)
+    return block.forward(in_features)
 
 
 def run_transformer_lm(
@@ -292,7 +322,7 @@ def run_transformer_lm(
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
         rope_theta (float): The RoPE $\Theta$ parameter.
-        weights (dict[str, Tensor]): 
+        weights (dict[str, Tensor]):
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).
             The keys of this dictionary are:
@@ -385,7 +415,7 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    return SiLU(in_features)
 
 
 def run_get_batch(
@@ -411,8 +441,9 @@ def run_get_batch(
     raise NotImplementedError
 
 
-
-def run_cross_entropy(inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]) -> Float[Tensor, ""]:
+def run_cross_entropy(
+    inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
+) -> Float[Tensor, ""]:
     """Given a tensor of inputs and targets, compute the average cross-entropy
     loss across examples.
 

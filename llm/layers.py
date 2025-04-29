@@ -104,6 +104,15 @@ class RMSNorm(nn.Module):
         return x.to(in_dtype)
 
 
+def SiLU(x: torch.Tensor) -> torch.Tensor:
+    """
+    Sigmoid-weighted linear unit (SiLU) activation function
+    :param x: Input tensor
+    :return: Output tensor after applying SiLU activation
+    """
+    return x * torch.sigmoid(x)
+
+
 class SwiGLU(nn.Module):
     """
     SwiGLU layer
@@ -141,16 +150,6 @@ class SwiGLU(nn.Module):
         self.W1 = Linear(d_model, d_ff, device, dtype)
         self.W2 = Linear(d_ff, d_model, device, dtype)
         self.W3 = Linear(d_model, d_ff)
-
-    def load_state_dict(self, state_dict: dict[str, torch.Tensor], **kwargs) -> None:
-        """
-        Load state dict for the SwiGLU layer
-        :param state_dict: State dict containing the weights
-        :param strict: Whether to enforce that the keys in state_dict match the keys returned by this module's state_dict()
-        """
-        for Wnum in ["W1", "W2", "W3"]:
-            assert Wnum in state_dict, f"{Wnum} not found in state_dict"
-            getattr(self, Wnum).load_state_dict({"W": state_dict[Wnum]}, **kwargs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -295,17 +294,15 @@ class CausalMHSA(nn.Module):
     """
 
     def __init__(
-        self,
-        d_model: int,
-        num_heads: int,
+        self, d_model: int, num_heads: int, device: torch.device | None = None, dtype: torch.dtype | None = None
     ):
         super().__init__()
         assert d_model % num_heads == 0
 
         # query, key, value projections for all heads, but in a batch
-        self.qkv_proj = Linear(d_model, d_model * 3)
+        self.qkv_proj = Linear(d_model, d_model * 3, device=device, dtype=dtype)
         # output projection
-        self.output_proj = Linear(d_model, d_model)
+        self.output_proj = Linear(d_model, d_model, device=device, dtype=dtype)
 
         self.d_model = d_model
         self.num_heads = num_heads
@@ -382,22 +379,30 @@ class CausalMHSARoPE(nn.Module):
         self,
         d_model: int,
         num_heads: int,
-        max_seq_len: int,
-        theta: float,
+        max_seq_len: int | None = None,
+        theta: float | None = None,
+        RoPE: RotaryPositionalEmbedding | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
         assert d_model % num_heads == 0
 
         # query, key, value projections for all heads, but in a batch
-        self.qkv_proj = Linear(d_model, d_model * 3)
+        self.qkv_proj = Linear(d_model, d_model * 3, device=device, dtype=dtype)
         # output projection
-        self.output_proj = Linear(d_model, d_model)
+        self.output_proj = Linear(d_model, d_model, device=device, dtype=dtype)
 
         self.d_model = d_model
         self.num_heads = num_heads
         self.head_size = d_model // num_heads
 
-        self.RoPE = RotaryPositionalEmbedding(theta, self.head_size, max_seq_len)
+        if RoPE is None:
+            assert max_seq_len is not None, "max_seq_len must be provided if RoPE is not provided"
+            assert theta is not None, "theta must be provided if RoPE is not provided"
+            self.RoPE = RotaryPositionalEmbedding(theta, self.head_size, max_seq_len, device=device)
+        else:
+            self.RoPE = RoPE
 
     def forward(
         self,
