@@ -345,7 +345,7 @@ if __name__ == "__main__":
         )
         for merge_item in merges[:10]:
             print(f"Merge: {repr(merge_item)}")
-        tokenizer = Tokenizer(vocab, merges, special_tokens=special_tokens)
+        tokenizer = Tokenizer(vocab, merges, special_tokens=args.special_tokens)
     else:
         tokenizer = Tokenizer.from_pickle(args.tokenized_dataset_pickle, special_tokens=args.special_tokens)
 
