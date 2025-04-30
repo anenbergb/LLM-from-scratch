@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from einops import einsum, rearrange
+import einx
 import math
 from jaxtyping import Float, Int, Bool
 from torch import Tensor
@@ -143,13 +144,11 @@ class SwiGLU(nn.Module):
     ):
         super().__init__()
         assert d_model % 64 == 0, "d_model (model hidden dim) must be a multiple of 64"
-        self.d_model = d_model
         if d_ff is None:
             d_ff = math.floor((8 / 3) * d_model)
-        self.d_ff = d_ff
         self.w1 = Linear(d_model, d_ff, device, dtype)
         self.w2 = Linear(d_ff, d_model, device, dtype)
-        self.w3 = Linear(d_model, d_ff)
+        self.w3 = Linear(d_model, d_ff, device, dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -158,11 +157,7 @@ class SwiGLU(nn.Module):
         :return: Output tensor of shape (batch_size, out_features)
         SwiGLU(x,W1,W2,W3) = W2 * (SiLU(W1*x) * W3*x)
         """
-        w1_out = self.w1(x)
-        w3_out = self.w3(x)
-        silu_out = w1_out * torch.sigmoid(w1_out)
-        out = self.w2(silu_out * w3_out)
-        return out
+        return self.w2(SiLU(self.w1(x)) * self.w3(x))
 
 
 class RotaryPositionalEmbedding(nn.Module):
@@ -197,14 +192,7 @@ class RotaryPositionalEmbedding(nn.Module):
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
         """
         x: (..., seq_len, d_k)
-        token_positions: (..., seq_len)
-
-        Process an input tensor of shape (..., seq_len, d_k) and return a tensor of the same shape. Note
-        that you should tolerate x with an arbitrary number of batch dimensions. You should assume
-        that the token positions are a tensor of shape (..., seq_len) specifying the token positions of
-        x along the sequence dimension.
-        You should use the token positions to slice your (possibly precomputed) cos and sin tensors along
-        the sequence dimension.
+        token_positions: (..., seq_len) specifying the token positions of x along the sequence dimension.
         """
         cos = self.cos[token_positions]  # (...,seq_len, d_k // 2)
         sin = self.sin[token_positions]
@@ -269,7 +257,7 @@ def scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    d_k = Q.shape[-1]
+    d_k = K.shape[-1]
     scores = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")  # Q @ K^T
     scores /= math.sqrt(d_k)
     if mask is not None:
@@ -307,6 +295,19 @@ class CausalMHSA(nn.Module):
         self.d_model = d_model
         self.num_heads = num_heads
         self.head_size = d_model // num_heads
+
+    def load_state_dict(self, state_dict: dict[str, torch.Tensor], **kwargs) -> None:
+        """
+        Load state dict for the CausalMHSA layer
+        :param state_dict: State dict containing the weights
+        """
+        if "q_proj.weight" and "k_proj.weight" and "v_proj.weight" in state_dict:
+            q_proj = state_dict.pop("q_proj.weight")
+            k_proj = state_dict.pop("k_proj.weight")
+            v_proj = state_dict.pop("v_proj.weight")
+            qkv_proj_weight = torch.cat([q_proj, k_proj, v_proj], dim=0)
+            state_dict["qkv_proj.weight"] = qkv_proj_weight
+        super().load_state_dict(state_dict, **kwargs)
 
     def forward(
         self,
@@ -404,6 +405,19 @@ class CausalMHSARoPE(nn.Module):
         else:
             self.RoPE = RoPE
 
+    def load_state_dict(self, state_dict: dict[str, torch.Tensor], **kwargs) -> None:
+        """
+        Load state dict for the CausalMHSARoPE layer
+        :param state_dict: State dict containing the weights
+        """
+        if "q_proj.weight" and "k_proj.weight" and "v_proj.weight" in state_dict:
+            q_proj = state_dict.pop("q_proj.weight")
+            k_proj = state_dict.pop("k_proj.weight")
+            v_proj = state_dict.pop("v_proj.weight")
+            qkv_proj_weight = torch.cat([q_proj, k_proj, v_proj], dim=0)
+            state_dict["qkv_proj.weight"] = qkv_proj_weight
+        super().load_state_dict(state_dict, **kwargs)
+
     def forward(
         self,
         in_features: Float[Tensor, " ... sequence_length d_in"],
@@ -418,6 +432,8 @@ class CausalMHSARoPE(nn.Module):
         Returns:
             Float[Tensor, " ... sequence_length d_out"]: Output tensor after applying attention.
         """
+        *batch, sequence_length, d_model = in_features.shape
+        assert d_model == self.d_model, f"Expected d_model {self.d_model}, but got {d_model}"
         qkv = self.qkv_proj(in_features)  # (..., sequence_length, 3*d_model)
         q, k, v = qkv.split(self.d_model, dim=-1)  # (..., T, d_model) x 3
 
@@ -442,20 +458,23 @@ class CausalMHSARoPE(nn.Module):
 
         if token_positions is None:
             # (1, 1, sequence_length)
-            token_positions = torch.arange(in_features.shape[-2], device=in_features.device).view((1, 1, -1))
+            token_positions = torch.arange(sequence_length, device=in_features.device)
+            token_positions = einx.rearrange("seq -> batch... seq", token_positions, batch=[1] * len(batch))
+
+        # Duplicate token positions for each head
+        token_positions = rearrange(token_positions, "... seq -> ... 1 seq")
         q = self.RoPE(q, token_positions)
         k = self.RoPE(k, token_positions)
 
         # (..., queries, keys)
-        # boolean mask of shape (..., queries, keys), which in thise case is
-        # (..., sequence_length, sequence_length)
-        sequence_length = in_features.shape[-2]
+        # boolean mask of shape (..., queries, keys), which in this case is
+        # (..., sequence_length, sequence_length). assume len(batch) == 1
         causal_mask = torch.tril(torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool))
         attention = scaled_dot_product_attention(q, k, v, causal_mask)  # (B, nh, seq_len, head_size)
 
         attention = rearrange(
             attention, "batch num_heads sequence_length head_size -> batch sequence_length (num_heads head_size)"
-        )
+        ).contiguous()
         # output projection
         out = self.output_proj(attention)
         return out
