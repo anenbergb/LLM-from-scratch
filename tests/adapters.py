@@ -25,6 +25,14 @@ from llm.layers import (
 from llm.transformer import TransformerBlock, TransformerLM
 
 
+def cat_qkv_weights(weights, prefix=""):
+    q = weights.pop(f"{prefix}q_proj.weight")
+    k = weights.pop(f"{prefix}k_proj.weight")
+    v = weights.pop(f"{prefix}v_proj.weight")
+    weights[f"{prefix}qkv_proj.weight"] = torch.cat([q, k, v], dim=0)
+    return weights
+
+
 def run_linear(
     d_in: int,
     d_out: int,
@@ -136,6 +144,7 @@ def run_multihead_self_attention(
         "v_proj.weight": v_proj_weight,
         "output_proj.weight": o_proj_weight,
     }
+    weights = cat_qkv_weights(weights, prefix="")
     mhsa.load_state_dict(weights)
     return mhsa(in_features)
 
@@ -184,6 +193,7 @@ def run_multihead_self_attention_with_rope(
         "v_proj.weight": v_proj_weight,
         "output_proj.weight": o_proj_weight,
     }
+    weights = cat_qkv_weights(weights, prefix="")
     mhsa.load_state_dict(weights)
     return mhsa(in_features, token_positions)
 
@@ -285,19 +295,8 @@ def run_transformer_block(
     assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
     RoPE = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len, device=in_features.device)
     block = TransformerBlock(d_model, num_heads, d_ff, RoPE=RoPE, device=in_features.device, dtype=in_features.dtype)
-    qkv_proj_weight = torch.cat(
-        [
-            weights["attn.q_proj.weight"],
-            weights["attn.k_proj.weight"],
-            weights["attn.v_proj.weight"],
-        ],
-        dim=0,
-    )
-    weights.pop("attn.q_proj.weight")
-    weights.pop("attn.k_proj.weight")
-    weights.pop("attn.v_proj.weight")
-    weights["attn.qkv_proj.weight"] = qkv_proj_weight
-    block.load_state_dict(weights, strict=True)
+    weights = cat_qkv_weights(weights, prefix="attn.")
+    block.load_state_dict(weights)
     return block(in_features)
 
 
@@ -392,10 +391,7 @@ def run_transformer_lm(
         dtype=weights["token_embeddings.weight"].dtype,
     )
     for i in range(num_layers):
-        q = weights.pop(f"layers.{i}.attn.q_proj.weight")
-        k = weights.pop(f"layers.{i}.attn.k_proj.weight")
-        v = weights.pop(f"layers.{i}.attn.v_proj.weight")
-        weights[f"layers.{i}.attn.qkv_proj.weight"] = torch.cat([q, k, v], dim=0)
+        weights = cat_qkv_weights(weights, prefix=f"layers.{i}.attn.")
     transformer.load_state_dict(weights)
     return transformer(in_indices)
 

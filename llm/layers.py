@@ -296,19 +296,6 @@ class CausalMHSA(nn.Module):
         self.num_heads = num_heads
         self.head_size = d_model // num_heads
 
-    def load_state_dict(self, state_dict: dict[str, torch.Tensor], **kwargs) -> None:
-        """
-        Load state dict for the CausalMHSA layer
-        :param state_dict: State dict containing the weights
-        """
-        if "q_proj.weight" and "k_proj.weight" and "v_proj.weight" in state_dict:
-            q_proj = state_dict.pop("q_proj.weight")
-            k_proj = state_dict.pop("k_proj.weight")
-            v_proj = state_dict.pop("v_proj.weight")
-            qkv_proj_weight = torch.cat([q_proj, k_proj, v_proj], dim=0)
-            state_dict["qkv_proj.weight"] = qkv_proj_weight
-        super().load_state_dict(state_dict, **kwargs)
-
     def forward(
         self,
         in_features: Float[Tensor, " ... sequence_length d_in"],
@@ -348,7 +335,9 @@ class CausalMHSA(nn.Module):
         # boolean mask of shape (..., queries, keys), which in thise case is
         # (..., sequence_length, sequence_length)
         sequence_length = in_features.shape[-2]
-        causal_mask = torch.tril(torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool))
+        causal_mask = torch.tril(torch.ones((sequence_length, sequence_length), dtype=torch.bool))
+        causal_mask = causal_mask[None, None, :, :]  # [1, 1, seq, seq]
+
         attention = scaled_dot_product_attention(q, k, v, causal_mask)  # (B, nh, seq_len, head_size)
 
         attention = rearrange(
@@ -405,19 +394,6 @@ class CausalMHSARoPE(nn.Module):
         else:
             self.RoPE = RoPE
 
-    def load_state_dict(self, state_dict: dict[str, torch.Tensor], **kwargs) -> None:
-        """
-        Load state dict for the CausalMHSARoPE layer
-        :param state_dict: State dict containing the weights
-        """
-        if "q_proj.weight" and "k_proj.weight" and "v_proj.weight" in state_dict:
-            q_proj = state_dict.pop("q_proj.weight")
-            k_proj = state_dict.pop("k_proj.weight")
-            v_proj = state_dict.pop("v_proj.weight")
-            qkv_proj_weight = torch.cat([q_proj, k_proj, v_proj], dim=0)
-            state_dict["qkv_proj.weight"] = qkv_proj_weight
-        super().load_state_dict(state_dict, **kwargs)
-
     def forward(
         self,
         in_features: Float[Tensor, " ... sequence_length d_in"],
@@ -469,7 +445,8 @@ class CausalMHSARoPE(nn.Module):
         # (..., queries, keys)
         # boolean mask of shape (..., queries, keys), which in this case is
         # (..., sequence_length, sequence_length). assume len(batch) == 1
-        causal_mask = torch.tril(torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool))
+        causal_mask = torch.tril(torch.ones((sequence_length, sequence_length), dtype=torch.bool))
+        causal_mask = causal_mask[None, None, :, :]  # [1, 1, seq, seq]
         attention = scaled_dot_product_attention(q, k, v, causal_mask)  # (B, nh, seq_len, head_size)
 
         attention = rearrange(

@@ -82,6 +82,9 @@ class TransformerLM(nn.Module):
     ):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.d_model = d_model
         self.token_embeddings = Embedding(vocab_size, d_model, device=device, dtype=dtype)
         self.RoPE = RotaryPositionalEmbedding(rope_theta, d_model // num_heads, context_length, device=device)
 
@@ -97,16 +100,15 @@ class TransformerLM(nn.Module):
     def forward(
         self,
         in_indices: Int[Tensor, " batch sequence_length"],
-        token_positions: Int[Tensor, " batch sequence_length"] | None = None,
     ) -> Float[Tensor, " batch sequence_length vocab_size"]:
         """
-        in_indices: Input tensor of shape (batch_size, sequence_length).
+        in_indices: Input token ids (batch_size, sequence_length).
         Returns:
             Output tensor of shape (batch_size, sequence_length, vocab_size).
         """
         x = self.token_embeddings(in_indices)
         for layer in self.layers:
-            x = layer(x, token_positions)
+            x = layer(x)
         x = self.ln_final(x)
         x = self.lm_head(x)
         return x
