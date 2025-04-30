@@ -47,9 +47,9 @@ class TransformerBlock(nn.Module):
         Returns:
             Output tensor of the same shape as in_features.
         """
-        out = in_features + self.attn(self.ln1(in_features), token_positions)
-        out = out + self.ffn(self.ln2(out))
-        return out
+        out1 = in_features + self.attn(self.ln1(in_features), token_positions=token_positions)
+        out2 = out1 + self.ffn(self.ln2(out1))
+        return out2
 
 
 class TransformerLM(nn.Module):

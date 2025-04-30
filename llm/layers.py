@@ -100,9 +100,8 @@ class RMSNorm(nn.Module):
         x = x.to(torch.float32)
         mean = torch.mean(x**2, dim=-1, keepdim=True)
         rms = torch.sqrt(mean + self.eps)
-        x /= rms  # normalize
-        x *= self.weight  # apply learnable gain
-        return x.to(in_dtype)
+        out = ((x / rms) * self.weight).to(in_dtype)  # normalize and apply learnable gain
+        return out
 
 
 def SiLU(x: torch.Tensor) -> torch.Tensor:
@@ -312,14 +311,14 @@ class CausalMHSA(nn.Module):
         qkv = self.qkv_proj(in_features)  # (..., sequence_length, 3*d_model)
         q, k, v = qkv.split(self.d_model, dim=-1)  # (..., T, d_model) x 3
 
-        k = rearrange(
-            k,
+        q = rearrange(
+            q,
             "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
             head_size=self.head_size,
             num_heads=self.num_heads,
         )
-        q = rearrange(
-            q,
+        k = rearrange(
+            k,
             "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
             head_size=self.head_size,
             num_heads=self.num_heads,
@@ -413,14 +412,14 @@ class CausalMHSARoPE(nn.Module):
         qkv = self.qkv_proj(in_features)  # (..., sequence_length, 3*d_model)
         q, k, v = qkv.split(self.d_model, dim=-1)  # (..., T, d_model) x 3
 
-        k = rearrange(
-            k,
+        q = rearrange(
+            q,
             "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
             head_size=self.head_size,
             num_heads=self.num_heads,
         )
-        q = rearrange(
-            q,
+        k = rearrange(
+            k,
             "batch sequence_length (num_heads head_size) -> batch num_heads sequence_length head_size",
             head_size=self.head_size,
             num_heads=self.num_heads,
@@ -439,6 +438,7 @@ class CausalMHSARoPE(nn.Module):
 
         # Duplicate token positions for each head
         token_positions = rearrange(token_positions, "... seq -> ... 1 seq")
+
         q = self.RoPE(q, token_positions)
         k = self.RoPE(k, token_positions)
 
