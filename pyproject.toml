@@ -21,6 +21,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.19.7",
     "ruff",
+    "loguru",
 ]
 
 [project.optional-dependencies]
