@@ -36,6 +36,9 @@ class Linear(nn.Module):
         """
         return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
 
+    def extra_repr(self):
+        return f"d_out={self.weight.shape[0]}, d_in={self.weight.shape[1]}"
+
 
 class Embedding(nn.Module):
     """
@@ -70,6 +73,9 @@ class Embedding(nn.Module):
         assert token_ids.dtype == torch.long, "token_ids must be of type long"
         return self.weight[token_ids]
 
+    def extra_repr(self):
+        return f"vocab_size={self.weight.shape[0]}, d={self.weight.shape[1]}"
+
 
 class RMSNorm(nn.Module):
     """
@@ -102,6 +108,9 @@ class RMSNorm(nn.Module):
         rms = torch.sqrt(mean + self.eps)
         out = ((x / rms) * self.weight).to(in_dtype)  # normalize and apply learnable gain
         return out
+
+    def extra_repr(self):
+        return f"hidden_size={self.weight.shape[0]}, eps={self.eps}"
 
 
 def SiLU(x: torch.Tensor) -> torch.Tensor:
@@ -211,6 +220,9 @@ class RotaryPositionalEmbedding(nn.Module):
         # x_neg_shift[..., 1::2] = x[..., ::2]
         # x_neg_shift[..., ::2] = -x[..., 1::2]
         return x * cos_expanded + x_neg_shift * sin_expanded
+
+    def extra_repr(self):
+        return f"context_length={self.cos.shape[0]}, dim/2={self.cos.shape[1]}"
 
 
 def softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
