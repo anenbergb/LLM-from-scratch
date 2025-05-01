@@ -26,6 +26,7 @@ from llm.nn_utils import (
     softmax as run_softmax,
     cross_entropy as run_cross_entropy,
 )
+from llm.optimizer import AdamW
 
 
 def cat_qkv_weights(weights, prefix=""):
@@ -477,7 +478,7 @@ def get_adamw_cls() -> type[torch.optim.Optimizer]:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(

@@ -1,7 +1,4 @@
 import torch
-from einops import einsum, rearrange
-import einx
-import math
 from jaxtyping import Float, Int, Bool
 from torch import Tensor
 
@@ -66,3 +63,7 @@ def cross_entropy(inputs: Float[Tensor, " ... vocab_size"], targets: Int[Tensor,
     # (batch_size, seq_len, vocab_size) -> (batch_size, seq_len, 1)
     gathered = torch.gather(neg_log_prob, -1, targets.unsqueeze(-1))
     return torch.mean(gathered)
+
+
+def perplexity(inputs: Float[Tensor, " ... vocab_size"], targets: Int[Tensor, " ..."]) -> Float[Tensor, ""]:
+    return torch.exp(cross_entropy(inputs, targets))
