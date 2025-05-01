@@ -25,6 +25,7 @@ from llm.transformer import TransformerBlock, TransformerLM
 from llm.nn_utils import (
     softmax as run_softmax,
     cross_entropy as run_cross_entropy,
+    gradient_clipping as run_gradient_clipping,
 )
 from llm.optimizer import (
     AdamW,
@@ -461,18 +462,6 @@ def run_get_batch(
         Tuple of torch.LongTensors of shape (batch_size, context_length). The first tuple item
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
-    """
-    raise NotImplementedError
-
-
-def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
-    """Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.
-
-    Args:
-        parameters (Iterable[torch.nn.Parameter]): collection of trainable parameters.
-        max_l2_norm (float): a positive value containing the maximum l2-norm.
-
-    The gradients of the parameters (parameter.grad) should be modified in-place.
     """
     raise NotImplementedError
 

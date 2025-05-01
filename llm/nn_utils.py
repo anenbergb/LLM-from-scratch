@@ -1,6 +1,7 @@
 import torch
-from jaxtyping import Float, Int, Bool
+from jaxtyping import Float, Int
 from torch import Tensor
+from collections.abc import Iterable
 
 
 def softmax(in_features: Float[Tensor, " ..."], dim: int = -1) -> Float[Tensor, " ..."]:
@@ -67,3 +68,20 @@ def cross_entropy(inputs: Float[Tensor, " ... vocab_size"], targets: Int[Tensor,
 
 def perplexity(inputs: Float[Tensor, " ... vocab_size"], targets: Int[Tensor, " ..."]) -> Float[Tensor, ""]:
     return torch.exp(cross_entropy(inputs, targets))
+
+
+def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float, eps: float = 1e-6) -> None:
+    """Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.
+
+    Args:
+        parameters (Iterable[torch.nn.Parameter]): collection of trainable parameters.
+        max_l2_norm (float): a positive value containing the maximum l2-norm.
+
+    The gradients of the parameters (parameter.grad) are modified in-place.
+    """
+    grads = [p.grad for p in parameters if p.grad is not None]
+    norm = torch.sqrt(sum((g**2).sum() for g in grads))
+
+    clip_coef = min(1, max_l2_norm / (norm + 1e-6))
+    for g in grads:
+        g *= clip_coef
