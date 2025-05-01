@@ -17,12 +17,15 @@ from llm.layers import (
     SiLU,
     SwiGLU,
     RotaryPositionalEmbedding,
-    softmax as run_softmax,
     scaled_dot_product_attention as run_scaled_dot_product_attention,
     CausalMHSA,
     CausalMHSARoPE,
 )
 from llm.transformer import TransformerBlock, TransformerLM
+from llm.nn_utils import (
+    softmax as run_softmax,
+    cross_entropy as run_cross_entropy,
+)
 
 
 def cat_qkv_weights(weights, prefix=""):
@@ -454,24 +457,6 @@ def run_get_batch(
         Tuple of torch.LongTensors of shape (batch_size, context_length). The first tuple item
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
-    """
-    raise NotImplementedError
-
-
-def run_cross_entropy(
-    inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
-) -> Float[Tensor, ""]:
-    """Given a tensor of inputs and targets, compute the average cross-entropy
-    loss across examples.
-
-    Args:
-        inputs (Float[Tensor, "batch_size vocab_size"]): inputs[i][j] is the
-            unnormalized logit of jth class for the ith example.
-        targets (Int[Tensor, "batch_size"]): Tensor of shape (batch_size,) with the index of the correct class.
-            Each value must be between 0 and `num_classes - 1`.
-
-    Returns:
-        Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
     raise NotImplementedError
 
