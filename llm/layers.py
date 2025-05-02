@@ -439,7 +439,9 @@ class CausalMHSARoPE(nn.Module):
         # (..., queries, keys)
         # boolean mask of shape (..., queries, keys), which in this case is
         # (..., sequence_length, sequence_length). assume len(batch) == 1
-        causal_mask = torch.tril(torch.ones((sequence_length, sequence_length), dtype=torch.bool))
+        causal_mask = torch.tril(
+            torch.ones((sequence_length, sequence_length), dtype=torch.bool, device=in_features.device)
+        )
         causal_mask = causal_mask[None, None, :, :]  # [1, 1, seq, seq]
         attention = scaled_dot_product_attention(q, k, v, causal_mask)  # (B, nh, seq_len, head_size)
 

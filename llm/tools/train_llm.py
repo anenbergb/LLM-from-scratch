@@ -3,6 +3,19 @@ import os
 import sys
 import shutil
 from loguru import logger
+import numpy as np
+import random
+import torch
+from tqdm import tqdm
+
+from fvcore.nn import parameter_count_table, FlopCountAnalysis
+
+from llm.tokenization import Tokenizer
+from llm.transformer import TransformerLM
+from llm.data import random_training_iterator, SequentialValidationDataset
+from llm.optimizer import get_lr_cosine_schedule, AdamW
+from llm.nn_utils import cross_entropy, perplexity, gradient_clipping
+from llm.serialization import load_checkpoint, save_checkpoint
 
 
 def get_args() -> argparse.Namespace:
@@ -32,6 +45,7 @@ Run the LLM pre-training.
         default=os.path.join(EXPR_DIR, "tokenization/bpe_10k_tinystories.pkl"),
         help="Path to a tokenized dataset .pkl file. The vocabulary can be recovered from this file.",
     )
+    parser.add_argument("--special-tokens", type=str, nargs="+", default=["<|endoftext|>"])
 
     # output and logging
     parser.add_argument(
@@ -45,6 +59,12 @@ Run the LLM pre-training.
         action="store_true",
         default=False,
         help="Overwrite the content of the output directory",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for initialization",
     )
 
     # data loading
@@ -149,6 +169,19 @@ Run the LLM pre-training.
     return parser.parse_args()
 
 
+def set_all_seeds(seed=42):
+    logger.info(f"Setting all seeds to {seed}")
+    # Python built-in random module
+    random.seed(seed)
+
+    # NumPy
+    np.random.seed(seed)
+
+    # PyTorch (CPU and CUDA)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+
 def delete_output_dir(output_dir):
     for filename in os.listdir(output_dir):
         file_path = os.path.join(output_dir, filename)
@@ -161,7 +194,46 @@ def delete_output_dir(output_dir):
             logger.error(f"Failed to delete {file_path}. Reason: {e}")
 
 
+def load_tokenizer(tokenizer_pickle_path: str, special_tokens: list[str]):
+    tokenizer = Tokenizer.from_pickle(tokenizer_pickle_path, special_tokens=special_tokens)
+    logger.info(f"Tokenizer loaded from {tokenizer_pickle_path} with vocabulary size {len(tokenizer.vocab)}")
+    return tokenizer
+
+
+def load_model(args, vocab_size: int, device: str):
+    model = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=args.context_length,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        d_model=args.d_model,
+        d_ff=args.d_ff,
+        rope_theta=args.rope_theta,
+        device=device,
+    ).to(device)
+    logger.info("TransformerLM specifications:")
+    logger.info(f"  vocab_size: {vocab_size}")
+    logger.info(f"  context length: {args.context_length}")
+    logger.info(f"  num_layers: {args.num_layers}")
+    logger.info(f"  num_heads: {args.num_heads}")
+    logger.info(f"  d_model: {args.d_model}")
+    logger.info(f"  d_ff: {args.d_ff}")
+    logger.info(f"  rope_theta: {args.rope_theta}")
+
+    logger.info("Calculating FLOPs...")
+    with torch.no_grad():
+        in_indices = torch.zeros(1, args.context_length, dtype=torch.int64)
+        flops = FlopCountAnalysis(model, in_indices)
+        logger.info(f"FLOPs: {flops.total() / 1e9:.2f} GFLOPs")  # in billions
+
+    logger.info(f"Number of parameters:\n{parameter_count_table(model)}")
+    return model
+
+
 def train(args):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Using device: {device}")
+    set_all_seeds(args.seed)
     if os.path.exists(args.output_dir):
         if args.overwrite_output_dir:
             logger.warning(
@@ -178,6 +250,72 @@ def train(args):
     else:
         os.makedirs(args.output_dir, exist_ok=True)
         logger.info(f"Output directory ({args.output_dir}) created.")
+
+    train_dataset = np.load(args.train_dataset, mmap_mode="r")
+    val_dataset = np.load(args.val_dataset, mmap_mode="r")
+
+    tokenizer = load_tokenizer(args.tokenized_dataset_pickle, args.special_tokens)
+    vocab_size = len(tokenizer.vocab)
+    model = load_model(args, vocab_size, device)
+    model.train()
+
+    optimizer = AdamW(
+        model.parameters(),
+        lr=args.max_lr,
+        betas=(args.adam_beta1, args.adam_beta2),
+        weight_decay=args.weight_decay,
+    )
+
+    start_iter = 0
+    if args.resume_from_checkpoint:
+        logger.info(f"Resuming from checkpoint: {args.resume_from_checkpoint}")
+        if not os.path.exists(args.resume_from_checkpoint):
+            logger.error(f"Checkpoint path {args.resume_from_checkpoint} does not exist.")
+            sys.exit(1)
+        start_iter = load_checkpoint(args.resume_from_checkpoint, model, optimizer)
+        logger.info(f"Resuming from iteration {start_iter}")
+    else:
+        start_iter = 0
+
+    logger.info(f"Training for {args.max_train_iters} iterations")
+    logger.info(f"Evaluation every {args.evaluation_iters} iterations")
+    logger.info(f"Gradient clipping max norm: {args.gradient_max_norm}")
+    logger.info(f"Batch size: {args.batch_size}")
+    logger.info(f"Validation batch size: {args.val_batch_size}")
+
+    train_dataloader = random_training_iterator(
+        train_dataset, args.batch_size, args.context_length, device, args.max_train_iters
+    )
+    val_dataloader = SequentialValidationDataset(val_dataset, args.context_length, args.val_batch_size, device=device)
+
+    for step, batch in (
+        progress_bar := tqdm(
+            enumerate(train_dataloader, start=start_iter),
+            total=len(args.max_train_iters),
+            desc="Training",
+        )
+    ):
+        input_tokens, label_tokens = batch
+
+        logits = model(input_tokens)  # (N,seq_len,vocab_size)
+        loss = cross_entropy(logits, label_tokens)
+        perplexity = torch.exp(loss)
+        loss.backward()
+        gradient_clipping(model.parameters(), args.gradient_max_norm)
+        lr = get_lr_cosine_schedule(step, args.max_lr, args.min_lr, args.lr_warmup_iters, args.max_train_iters)
+        # somehow set the learning rate in the optimizer
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+        optimizer.step()
+        optimizer.zero_grad()
+        logs = {
+            "loss/train": loss.detach().item(),
+            "perplexity/train": perplexity.detach().item(),
+            "lr": lr,
+        }
+        progress_bar.set_postfix(**logs)
+
+    return 0
 
 
 if __name__ == "__main__":
