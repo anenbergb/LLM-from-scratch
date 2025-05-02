@@ -66,6 +66,18 @@ Run the LLM pre-training.
         default=42,
         help="Random seed for initialization",
     )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        help="Path to a specific checkpoint folder that the training should resume from. "
+        "Training will resume from the iteration that was saved in the checkpoint. ",
+    )
+    parser.add_argument(
+        "--checkpoint-iters",
+        type=int,
+        default=10000,
+        help="Checkpoint every N iterations",
+    )
 
     # data loading
     parser.add_argument("--batch-size", type=int, default=64, help="Training batch size")
@@ -80,12 +92,6 @@ Run the LLM pre-training.
         help="Maximum training iterations. This is the cosine cycle iters",
     )
     parser.add_argument("--lr-warmup-iters", type=int, default=10000, help="Warmup iterations")
-    parser.add_argument(
-        "--resume-from-checkpoint",
-        type=str,
-        help="Path to a specific checkpoint folder that the training should resume from. "
-        "Training will resume from the iteration that was saved in the checkpoint. ",
-    )
     parser.add_argument(
         "--evaluation-iters",
         type=int,
@@ -291,12 +297,15 @@ def train(args):
     for step, batch in (
         progress_bar := tqdm(
             enumerate(train_dataloader, start=start_iter),
-            total=len(args.max_train_iters),
+            total=args.max_train_iters,
             desc="Training",
         )
     ):
         input_tokens, label_tokens = batch
+        input_tokens = input_tokens.to(device)
+        label_tokens = label_tokens.to(device)
 
+        # AMP autocast
         logits = model(input_tokens)  # (N,seq_len,vocab_size)
         loss = cross_entropy(logits, label_tokens)
         perplexity = torch.exp(loss)
@@ -307,15 +316,72 @@ def train(args):
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
         optimizer.step()
-        optimizer.zero_grad()
+        optimizer.zero_grad()  # clear gradients before next loss.backward()
         logs = {
             "loss/train": loss.detach().item(),
             "perplexity/train": perplexity.detach().item(),
             "lr": lr,
         }
         progress_bar.set_postfix(**logs)
+        # log to tensorboard
 
+        if step > 0 and (step % args.checkpoint_iters == 0 or step == args.max_train_iters - 1):
+            checkpoint_path = os.path.join(args.output_dir, f"checkpoint_{step}.pt")
+            save_checkpoint(
+                model,
+                optimizer,
+                step,
+                checkpoint_path,
+            )
+
+        if step > 0 and (step % args.evaluation_iters == 0 or step == args.max_train_iters - 1):
+            torch.cuda.empty_cache()
+            val_metrics = run_validation(
+                model,
+                val_dataloader,
+                limit_val_iters=args.limit_val_iters,
+                global_step=step,
+            )
+            val_print_str = (
+                f"Validation metrics [Iteration {step}]: "
+                f"loss = {val_metrics['loss/val']:.2f}, perplexity = {val_metrics['perplexity/val']:.2f}"
+            )
+            logger.info(val_print_str)
+            # log to tensorboard
     return 0
+
+
+def run_validation(
+    model: TransformerLM,
+    val_dataloader: SequentialValidationDataset,
+    limit_val_iters: int = 0,
+    global_step: int = 0,
+):
+    total_loss = 0.0
+    model.eval()
+    with torch.inference_mode():
+        for step, (input_tokens, label_tokens) in tqdm(
+            enumerate(val_dataloader),
+            total=len(val_dataloader) if limit_val_iters == 0 else limit_val_iters,
+            desc="Validation",
+        ):
+            if limit_val_iters > 0 and step >= limit_val_iters:
+                break
+
+            # AMP autocast
+            logits = model(input_tokens)  # (N,seq_len,vocab_size)
+            loss = cross_entropy(logits, label_tokens)
+            total_loss += loss.detach().item()
+
+    avg_loss = total_loss / (1 + step)
+    avg_perplexity = torch.exp(torch.tensor(avg_loss)).item()
+    val_metrics = {
+        "loss/val": avg_loss,
+        "perplexity/val": avg_perplexity,
+    }
+    torch.cuda.empty_cache()
+    model.train()
+    return val_metrics
 
 
 if __name__ == "__main__":

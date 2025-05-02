@@ -84,6 +84,12 @@ class SequentialValidationDataset(IterableDataset):
         self.total_tokens = len(dataset)
         self.num_sequences = (self.total_tokens - 1) // context_length
 
+    def __len__(self) -> int:
+        """
+        Returns the number of batches in the dataset.
+        """
+        return (self.num_sequences - 1) // self.batch_size + 1
+
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         # Generate all sequences
         all_x = []
