@@ -86,7 +86,7 @@ Run the LLM pre-training.
     )
 
     # data loading
-    parser.add_argument("--batch-size", type=int, default=64, help="Training batch size")
+    parser.add_argument("--batch-size", type=int, default=128, help="Training batch size")
     parser.add_argument("--val-batch-size", type=int, default=128, help="Validation batch size")
     parser.add_argument("--context-length", type=int, default=256, help="Context length")
 
@@ -178,6 +178,12 @@ Run the LLM pre-training.
         default=10000.0,
         help="RoPE theta parameter",
     )
+    parser.add_argument(
+        "--weight-sharing",
+        action="store_true",
+        default=False,
+        help="Use weight sharing between token embeddings and output layer. Uses the Linear layer weight initialization.",
+    )
 
     # validation generation
     parser.add_argument(
@@ -254,6 +260,7 @@ def load_model(args, vocab_size: int, device: str):
         d_model=args.d_model,
         d_ff=args.d_ff,
         rope_theta=args.rope_theta,
+        weight_sharing=args.weight_sharing,
         device=device,
     ).to(device)
     logger.info("TransformerLM specifications:")

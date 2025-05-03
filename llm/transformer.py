@@ -79,6 +79,7 @@ class TransformerLM(nn.Module):
         d_model: int,
         d_ff: int,
         rope_theta: float,
+        weight_sharing: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -97,8 +98,10 @@ class TransformerLM(nn.Module):
             ]
         )
         self.ln_final = RMSNorm(d_model, device=device, dtype=dtype)
-        # TODO: share weights between linear layer and token embeddings
         self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
+        # weight sharing / weight tying
+        if weight_sharing:
+            self.token_embeddings.weight = self.lm_head.weight
 
     def forward(
         self,
