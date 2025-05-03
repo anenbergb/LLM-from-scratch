@@ -8,6 +8,7 @@ import random
 import torch
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+from torch.amp import autocast
 
 from fvcore.nn import parameter_count_table, FlopCountAnalysis
 
@@ -83,6 +84,13 @@ Run the LLM pre-training.
         type=int,
         default=10000,
         help="Checkpoint every N iterations",
+    )
+    parser.add_argument(
+        "--precision",
+        type=str,
+        default="bf16",
+        choices=["fp16", "bf16", "fp32"],
+        help="Precision to use for training.",
     )
 
     # data loading
@@ -284,7 +292,17 @@ def load_model(args, vocab_size: int, device: str):
 
 def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Using device: {device}")
+    if args.precision == "fp16":
+        precision = torch.float16
+    elif args.precision == "bf16":
+        precision = torch.bfloat16
+        if not torch.cuda.is_bf16_supported():
+            logger.error("bf16 is not supported on this device. Please use fp16 or fp32.")
+            sys.exit(1)
+    else:
+        precision = torch.float32
+
+    logger.info(f"Using device: {device} and precision: {precision}")
     set_all_seeds(args.seed)
     if os.path.exists(args.output_dir):
         if args.overwrite_output_dir:
@@ -355,9 +373,9 @@ def train(args):
         input_tokens = input_tokens.to(device)
         label_tokens = label_tokens.to(device)
 
-        # AMP autocast
-        logits = model(input_tokens)  # (N,seq_len,vocab_size)
-        loss = cross_entropy(logits, label_tokens)
+        with autocast(device_type=device, dtype=precision):
+            logits = model(input_tokens)  # (N,seq_len,vocab_size)
+            loss = cross_entropy(logits, label_tokens)
         perplexity = torch.exp(loss)
         loss.backward()
         gradient_clipping(model.parameters(), args.gradient_max_norm)
@@ -387,13 +405,14 @@ def train(args):
 
         if step > 0 and (step % args.evaluation_iters == 0 or step == args.max_train_iters - 1):
             torch.cuda.empty_cache()
-            val_metrics = run_validation(
-                model,
-                val_dataloader,
-                limit_val_iters=args.limit_val_iters,
-                global_step=step,
-                writer=writer,
-            )
+            with autocast(device_type=device, dtype=precision):
+                val_metrics = run_validation(
+                    model,
+                    val_dataloader,
+                    limit_val_iters=args.limit_val_iters,
+                    global_step=step,
+                    writer=writer,
+                )
             val_print_str = (
                 f"Validation metrics [Iteration {step}]: "
                 f"loss = {val_metrics['loss/val']:.2f}, perplexity = {val_metrics['perplexity/val']:.2f}"
