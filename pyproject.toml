@@ -22,6 +22,7 @@ dependencies = [
     "wandb>=0.19.7",
     "ruff",
     "loguru",
+    "tensorboard",
 ]
 
 [project.optional-dependencies]

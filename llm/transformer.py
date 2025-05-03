@@ -183,9 +183,9 @@ class TransformerLM(nn.Module):
 
         generated_token_ids = []
         while len(generated_token_ids) < max_new_tokens:
-            logits = self(x)  # (1, context_length, vocab_size)
+            logits = self.forward(x)  # (1, context_length, vocab_size)
             next_token_logits = logits[0, -1]  # (vocab_size,)
-            if top_k > 0:
+            if top_k > 0 and top_k < self.vocab_size:
                 top_k_tensor = torch.topk(next_token_logits, top_k)
                 prob = softmax(top_k_tensor.values, temperature=temperature)
                 vocab_indices = top_k_tensor.indices
@@ -198,12 +198,12 @@ class TransformerLM(nn.Module):
                 prob_cumsum = torch.cumsum(prob_sort.values, 0)
                 threshold_indices = torch.where(prob_cumsum <= top_p)[0]
                 threshold_index = 0 if len(threshold_indices) == 0 else threshold_indices[-1]
-                renormalized_total_prob = prob_cumsum[threshold_index]
 
-                prob = prob_sort[: threshold_index + 1] / renormalized_total_prob
+                prob = prob_sort[: threshold_index + 1]
                 top_p_indices = prob_sort.indices[: threshold_index + 1]
                 vocab_indices = vocab_indices[top_p_indices]
 
+            # it isn't necessary to re-normalize the probabilities
             sampled_index = torch.multinomial(prob, 1, generator=generator).item()
             vocab_index = vocab_indices[sampled_index]
             generated_token_ids.append(vocab_index)

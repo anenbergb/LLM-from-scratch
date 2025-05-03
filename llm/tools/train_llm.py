@@ -17,6 +17,11 @@ from llm.data import random_training_iterator, SequentialValidationDataset
 from llm.optimizer import get_lr_cosine_schedule, AdamW
 from llm.nn_utils import cross_entropy, perplexity, gradient_clipping
 from llm.serialization import load_checkpoint, save_checkpoint
+from llm.generation import generateLLM
+
+VAL_PROMPTS = [
+    "Once upon a time there was a little boy named Ben. Ben loved to",
+]
 
 
 def get_args() -> argparse.Namespace:
@@ -173,6 +178,39 @@ Run the LLM pre-training.
         default=10000.0,
         help="RoPE theta parameter",
     )
+
+    # validation generation
+    parser.add_argument(
+        "--val-prompt",
+        type=str,
+        default=VAL_PROMPTS[0],
+        help="Prompt to use for validation generation",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=100,
+        help="Maximum number of new tokens to generate during text generation",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature for text generation",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=10,
+        help="Top-k sampling for text generation",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=0.0,
+        help="Top-p (nucleus) sampling for text generation",
+    )
+
     return parser.parse_args()
 
 
@@ -347,12 +385,26 @@ def train(args):
                 val_dataloader,
                 limit_val_iters=args.limit_val_iters,
                 global_step=step,
+                writer=writer,
             )
             val_print_str = (
                 f"Validation metrics [Iteration {step}]: "
                 f"loss = {val_metrics['loss/val']:.2f}, perplexity = {val_metrics['perplexity/val']:.2f}"
             )
             logger.info(val_print_str)
+            run_generation(
+                model,
+                tokenizer,
+                val_prompts=[args.val_prompt],
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                seed=args.seed,
+                device=device,
+                global_step=step,
+                writer=writer,
+            )
 
     writer.close()
     return 0
@@ -394,6 +446,37 @@ def run_validation(
     torch.cuda.empty_cache()
     model.train()
     return val_metrics
+
+
+def run_generation(
+    model: TransformerLM,
+    tokenizer: Tokenizer,
+    val_prompts: list[str],
+    max_new_tokens: int = 100,
+    temperature: float = 1.0,
+    top_k: int = 10,
+    top_p: float = 0.0,
+    seed: int = 42,
+    device: str = "cuda",
+    global_step: int = 0,
+    writer: SummaryWriter = None,
+):
+    logger.info(f"Running generation with seed {seed}")
+    for i, val_prompt in enumerate(val_prompts):
+        generated_text = generateLLM(
+            model,
+            tokenizer,
+            val_prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            seed=seed,
+            device=device,
+        )
+        print_text = f"PROMPT:\n{val_prompt}\nGENERATED:\n{val_prompt}{generated_text}"
+        logger.info(f"\n{print_text}")
+        writer.add_text(f"val_generations/{i}", print_text, global_step=global_step)
 
 
 if __name__ == "__main__":
