@@ -4,8 +4,10 @@ from einops import einsum, rearrange
 import math
 from jaxtyping import Float, Int, Bool
 from torch import Tensor
+from loguru import logger
 
 from llm.layers import Linear, Embedding, RMSNorm, SwiGLU, CausalMHSARoPE, RotaryPositionalEmbedding
+from llm.nn_utils import softmax
 
 
 class TransformerBlock(nn.Module):
@@ -95,6 +97,7 @@ class TransformerLM(nn.Module):
             ]
         )
         self.ln_final = RMSNorm(d_model, device=device, dtype=dtype)
+        # TODO: share weights between linear layer and token embeddings
         self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
 
     def forward(
@@ -106,9 +109,109 @@ class TransformerLM(nn.Module):
         Returns:
             Output tensor of shape (batch_size, sequence_length, vocab_size).
         """
+        assert in_indices.shape[-1] <= self.context_length
         x = self.token_embeddings(in_indices)
         for layer in self.layers:
             x = layer(x)
         x = self.ln_final(x)
         x = self.lm_head(x)
         return x
+
+    @torch.no_grad()
+    def generate(
+        self,
+        in_indices: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        eos_token_id: int | None = None,
+        seed: int | None = None,
+    ):
+        """
+        Args:
+            in_indices: LongTensor of shape `(1, sequence_length,)` or `(sequence_length, )`.
+                Input IDs to condition on when generating.
+            max_new_tokens: int
+                Maximum number of tokens to generate.
+            temperature: float
+                Temperature to use during generation.
+                Temperature > 1 will increase randomness of the distribution, and encourage
+                    generation of less probable tokens
+                Temperature in range [0, 1] will reduce the randomness, increasing the
+                    probability of more likely tokens and avoiding predictions that might
+                    be too unexpected.
+                Temperature = 0 will be greedy decoding.
+            top_k: int
+                If provided, only sample from the `top_k` vocab items (by probability).
+                The probabilities are re-normalized before sampling the next token.
+            top_p: float
+                Top-p sampling (nucleus sampling)
+                Rather than sampling from the K words with the highest probability,
+                use all the most likely words whose cumulative probability exceeds `top_p` value.
+                If we use top_p=0.95, we will first filter out to keep the most likely words
+                that cumulatively have probability 0.94 or higher.
+                We then redistribute the probability and do regular sampling.
+            eos_token_id: int
+                If provided, stop generation when we generate this ID.
+
+        Returns: A LongTensor of shape (max_new_tokens,) with the generated model output.
+
+        """
+        assert top_k >= 0
+        assert top_p >= 0
+
+        if in_indices.dim() == 1:
+            in_indices = in_indices.unsqueeze(0)
+        else:
+            assert in_indices.dim() == 2
+            assert in_indices.shape[0] == 1
+
+        seq_len = in_indices.shape[-1]
+        if seq_len < self.context_length:
+            x = torch.zeros((1, self.context_length), dtype=in_indices.dtype, device=in_indices.device)
+            x[:, -seq_len:] = in_indices
+        elif seq_len > self.context_length:
+            # ignore the prefix if the provided sequence is too long
+            x = in_indices[:, -self.context_length :]
+        else:
+            x = in_indices
+
+        generator = torch.Generator(device=in_indices.device)
+        if seed is not None:
+            generator.manual_seed(seed)
+
+        generated_token_ids = []
+        while len(generated_token_ids) < max_new_tokens:
+            logits = self(x)  # (1, context_length, vocab_size)
+            next_token_logits = logits[0, -1]  # (vocab_size,)
+            if top_k > 0:
+                top_k_tensor = torch.topk(next_token_logits, top_k)
+                prob = softmax(top_k_tensor.values, temperature=temperature)
+                vocab_indices = top_k_tensor.indices
+            else:
+                prob = softmax(next_token_logits, dim=-1, temperature=temperature)
+                vocab_indices = torch.arange(len(next_token_logits))
+
+            if top_p > 0:
+                prob_sort = torch.sort(prob)
+                prob_cumsum = torch.cumsum(prob_sort.values, 0)
+                threshold_indices = torch.where(prob_cumsum <= top_p)[0]
+                threshold_index = 0 if len(threshold_indices) == 0 else threshold_indices[-1]
+                renormalized_total_prob = prob_cumsum[threshold_index]
+
+                prob = prob_sort[: threshold_index + 1] / renormalized_total_prob
+                top_p_indices = prob_sort.indices[: threshold_index + 1]
+                vocab_indices = vocab_indices[top_p_indices]
+
+            sampled_index = torch.multinomial(prob, 1, generator=generator).item()
+            vocab_index = vocab_indices[sampled_index]
+            generated_token_ids.append(vocab_index)
+            if eos_token_id is not None and vocab_index == eos_token_id:
+                break
+            x_new = x.clone()
+            x_new[0, :-1] = x[0, 1:]
+            x_new[0, -1] = vocab_index
+            x = x_new
+
+        return torch.tensor(generated_token_ids, dtype=torch.int64, device=in_indices.device)

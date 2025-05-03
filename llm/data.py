@@ -32,8 +32,8 @@ def get_batch(
     x = np.array([dataset[i : i + context_length] for i in starting_indices])
     y = np.array([dataset[i + 1 : i + context_length + 1] for i in starting_indices])
 
-    x = torch.LongTensor(x)
-    y = torch.LongTensor(y)
+    x = torch.from_numpy(x).to(dtype=torch.int64)
+    y = torch.from_numpy(y).to(dtype=torch.int64)
 
     if "cuda" in device:
         x = x.pin_memory().to(device, non_blocking=True)
@@ -108,8 +108,8 @@ class SequentialValidationDataset(IterableDataset):
 
         # Yield in batches
         for i in range(0, len(all_x), self.batch_size):
-            xb = torch.LongTensor(all_x[i : i + self.batch_size])
-            yb = torch.LongTensor(all_y[i : i + self.batch_size])
+            xb = torch.from_numpy(all_x[i : i + self.batch_size]).to(dtype=torch.int64)
+            yb = torch.from_numpy(all_y[i : i + self.batch_size]).to(dtype=torch.int64)
 
             if "cuda" in self.device:
                 xb = xb.pin_memory().to(self.device, non_blocking=True)

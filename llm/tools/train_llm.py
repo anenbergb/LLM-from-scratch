@@ -7,6 +7,7 @@ import numpy as np
 import random
 import torch
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 from fvcore.nn import parameter_count_table, FlopCountAnalysis
 
@@ -257,6 +258,10 @@ def train(args):
         os.makedirs(args.output_dir, exist_ok=True)
         logger.info(f"Output directory ({args.output_dir}) created.")
 
+    # Initialize TensorBoard writer
+    tb_logdir = os.path.join(args.output_dir, "tensorboard")
+    writer = SummaryWriter(log_dir=tb_logdir)
+
     train_dataset = np.load(args.train_dataset, mmap_mode="r")
     val_dataset = np.load(args.val_dataset, mmap_mode="r")
 
@@ -312,7 +317,6 @@ def train(args):
         loss.backward()
         gradient_clipping(model.parameters(), args.gradient_max_norm)
         lr = get_lr_cosine_schedule(step, args.max_lr, args.min_lr, args.lr_warmup_iters, args.max_train_iters)
-        # somehow set the learning rate in the optimizer
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
         optimizer.step()
@@ -323,7 +327,9 @@ def train(args):
             "lr": lr,
         }
         progress_bar.set_postfix(**logs)
-        # log to tensorboard
+        writer.add_scalar("loss/train", loss.detach().item(), step)
+        writer.add_scalar("perplexity/train", perplexity.detach().item(), step)
+        writer.add_scalar("learning_rate", lr, step)
 
         if step > 0 and (step % args.checkpoint_iters == 0 or step == args.max_train_iters - 1):
             checkpoint_path = os.path.join(args.output_dir, f"checkpoint_{step}.pt")
@@ -347,7 +353,8 @@ def train(args):
                 f"loss = {val_metrics['loss/val']:.2f}, perplexity = {val_metrics['perplexity/val']:.2f}"
             )
             logger.info(val_print_str)
-            # log to tensorboard
+
+    writer.close()
     return 0
 
 
@@ -356,6 +363,7 @@ def run_validation(
     val_dataloader: SequentialValidationDataset,
     limit_val_iters: int = 0,
     global_step: int = 0,
+    writer: SummaryWriter = None,
 ):
     total_loss = 0.0
     model.eval()
@@ -379,6 +387,10 @@ def run_validation(
         "loss/val": avg_loss,
         "perplexity/val": avg_perplexity,
     }
+    for key, value in val_metrics.items():
+        if writer is not None:
+            writer.add_scalar(key, value, global_step)
+
     torch.cuda.empty_cache()
     model.train()
     return val_metrics

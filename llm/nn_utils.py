@@ -4,7 +4,7 @@ from torch import Tensor
 from collections.abc import Iterable
 
 
-def softmax(in_features: Float[Tensor, " ..."], dim: int = -1) -> Float[Tensor, " ..."]:
+def softmax(in_features: Float[Tensor, " ..."], dim: int = -1, temperature: int = 1.0) -> Float[Tensor, " ..."]:
     """
     Given a tensor of inputs, return the output of softmaxing the given `dim`
     of the input.
@@ -17,6 +17,10 @@ def softmax(in_features: Float[Tensor, " ..."], dim: int = -1) -> Float[Tensor, 
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
+    assert temperature > 0
+    if temperature != 1:
+        in_features = in_features / temperature
+
     max_along_dim = torch.max(in_features, dim=dim, keepdim=True).values
     in_features_submax = in_features - max_along_dim
     exp = torch.exp(in_features_submax)
