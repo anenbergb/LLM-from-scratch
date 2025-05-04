@@ -105,10 +105,10 @@ class RMSNorm(nn.Module):
         :return: Output tensor of shape (batch_size, sequence_length, d_model)
         """
         in_dtype = x.dtype
-        x = x.to(torch.float32)
-        mean = torch.mean(x**2, dim=-1, keepdim=True)
+        x_fp32 = x.to(torch.float32)
+        mean = torch.mean(x_fp32**2, dim=-1, keepdim=True)
         rms = torch.sqrt(mean + self.eps)
-        out = ((x / rms) * self.weight).to(in_dtype)  # normalize and apply learnable gain
+        out = (x_fp32 / rms).to(in_dtype) * self.weight  # normalize and apply learnable gain
         return out
 
     def extra_repr(self):

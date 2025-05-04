@@ -74,7 +74,7 @@ def perplexity(inputs: Float[Tensor, " ... vocab_size"], targets: Int[Tensor, " 
     return torch.exp(cross_entropy(inputs, targets))
 
 
-def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float, eps: float = 1e-6) -> None:
+def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float, eps: float = 1e-6) -> float:
     """Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.
 
     Args:
@@ -84,8 +84,10 @@ def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: flo
     The gradients of the parameters (parameter.grad) are modified in-place.
     """
     grads = [p.grad for p in parameters if p.grad is not None]
-    norm = torch.sqrt(sum((g**2).sum() for g in grads))
+    norm = torch.sqrt(sum((g**2).sum() for g in grads)).item()
 
     clip_coef = min(1, max_l2_norm / (norm + 1e-6))
     for g in grads:
         g *= clip_coef
+
+    return norm

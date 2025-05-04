@@ -7,6 +7,7 @@ import numpy as np
 import random
 import torch
 from tqdm import tqdm
+from collections import deque
 from torch.utils.tensorboard import SummaryWriter
 from torch.amp import autocast
 
@@ -89,8 +90,16 @@ Run the LLM pre-training.
         "--precision",
         type=str,
         default="bf16",
-        choices=["fp16", "bf16", "fp32"],
+        choices=["bf16", "fp32"],
         help="Precision to use for training.",
+    )
+
+    # Checkpointing
+    parser.add_argument(
+        "--num-checkpoints",
+        type=int,
+        default=5,
+        help="Number of checkpoints to keep. Older checkpoints will be deleted.",
     )
 
     # data loading
@@ -291,10 +300,12 @@ def load_model(args, vocab_size: int, device: str):
 
 
 def train(args):
+    set_all_seeds(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    if args.precision == "fp16":
-        precision = torch.float16
-    elif args.precision == "bf16":
+    torch.backends.cuda.matmul.allow_tf32 = True
+    # allows PyTorch to use TF32 instead of true FP32 when doing matrix multiplications
+    torch.set_float32_matmul_precision("high")
+    if args.precision == "bf16":
         precision = torch.bfloat16
         if not torch.cuda.is_bf16_supported():
             logger.error("bf16 is not supported on this device. Please use fp16 or fp32.")
@@ -303,7 +314,6 @@ def train(args):
         precision = torch.float32
 
     logger.info(f"Using device: {device} and precision: {precision}")
-    set_all_seeds(args.seed)
     if os.path.exists(args.output_dir):
         if args.overwrite_output_dir:
             logger.warning(
@@ -331,7 +341,6 @@ def train(args):
     tokenizer = load_tokenizer(args.tokenized_dataset_pickle, args.special_tokens)
     vocab_size = len(tokenizer.vocab)
     model = load_model(args, vocab_size, device)
-    model.train()
 
     optimizer = AdamW(
         model.parameters(),
@@ -350,18 +359,33 @@ def train(args):
         logger.info(f"Resuming from iteration {start_iter}")
     else:
         start_iter = 0
+    checkpoint_paths = deque()
+
+    model.train()
+    compiled_model = torch.compile(
+        model,
+        mode="max-autotune",
+        fullgraph=True,  # since model has static control flow
+        dynamic=False,  # tell TorchDynamo shapes may change
+    )
 
     logger.info(f"Training for {args.max_train_iters} iterations")
     logger.info(f"Evaluation every {args.evaluation_iters} iterations")
+    logger.info(f"Training dataset contains {len(train_dataset)} tokens")
+    logger.info(f"Validation dataset contains {len(val_dataset)} tokens")
+
     logger.info(f"Gradient clipping max norm: {args.gradient_max_norm}")
     logger.info(f"Batch size: {args.batch_size}")
     logger.info(f"Validation batch size: {args.val_batch_size}")
+    logger.info(f"Checkpoint every {args.checkpoint_iters} iterations")
+    logger.info(f"Only keep the last {args.num_checkpoints} checkpoints")
 
     train_dataloader = random_training_iterator(
         train_dataset, args.batch_size, args.context_length, device, args.max_train_iters
     )
     val_dataloader = SequentialValidationDataset(val_dataset, args.context_length, args.val_batch_size, device=device)
 
+    best_val_loss = float("inf")
     for step, batch in (
         progress_bar := tqdm(
             enumerate(train_dataloader, start=start_iter),
@@ -370,15 +394,16 @@ def train(args):
         )
     ):
         input_tokens, label_tokens = batch
-        input_tokens = input_tokens.to(device)
-        label_tokens = label_tokens.to(device)
+        input_tokens = input_tokens.to(device, non_blocking=True)
+        label_tokens = label_tokens.to(device, non_blocking=True)
 
         with autocast(device_type=device, dtype=precision):
-            logits = model(input_tokens)  # (N,seq_len,vocab_size)
+            logits = compiled_model(input_tokens)  # (N,seq_len,vocab_size)
             loss = cross_entropy(logits, label_tokens)
-        perplexity = torch.exp(loss)
+            perplexity = torch.exp(loss)
+
         loss.backward()
-        gradient_clipping(model.parameters(), args.gradient_max_norm)
+        total_norm = gradient_clipping(model.parameters(), args.gradient_max_norm)
         lr = get_lr_cosine_schedule(step, args.max_lr, args.min_lr, args.lr_warmup_iters, args.max_train_iters)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
@@ -393,33 +418,51 @@ def train(args):
         writer.add_scalar("loss/train", loss.detach().item(), step)
         writer.add_scalar("perplexity/train", perplexity.detach().item(), step)
         writer.add_scalar("learning_rate", lr, step)
+        writer.add_scalar("grad_norm", total_norm, step)
 
         if step > 0 and (step % args.checkpoint_iters == 0 or step == args.max_train_iters - 1):
             checkpoint_path = os.path.join(args.output_dir, f"checkpoint_{step}.pt")
+            logger.info(f"Saving checkpoint to {checkpoint_path}")
             save_checkpoint(
                 model,
                 optimizer,
                 step,
                 checkpoint_path,
             )
+            checkpoint_paths.append(checkpoint_path)
+
+            if len(checkpoint_paths) > args.num_checkpoints:
+                oldest = checkpoint_paths.popleft()
+                try:
+                    os.remove(oldest)
+                    logger.info(f"Deleted old checkpoint: {oldest}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete old checkpoint {oldest}: {e}")
 
         if step > 0 and (step % args.evaluation_iters == 0 or step == args.max_train_iters - 1):
-            torch.cuda.empty_cache()
-            with autocast(device_type=device, dtype=precision):
-                val_metrics = run_validation(
-                    model,
-                    val_dataloader,
-                    limit_val_iters=args.limit_val_iters,
-                    global_step=step,
-                    writer=writer,
-                )
+            print_str = (
+                f"Training metrics [Iteration {step}]: "
+                f"loss = {logs['loss/train']:.2f}, perplexity = {logs['perplexity/train']:.2f}, lr = {lr:.4e}, "
+            )
+            logger.info(print_str)
+            val_metrics = run_validation(
+                compiled_model,
+                val_dataloader,
+                limit_val_iters=args.limit_val_iters,
+                global_step=step,
+                writer=writer,
+                precision=precision,
+            )
             val_print_str = (
                 f"Validation metrics [Iteration {step}]: "
                 f"loss = {val_metrics['loss/val']:.2f}, perplexity = {val_metrics['perplexity/val']:.2f}"
             )
             logger.info(val_print_str)
+            if val_metrics["loss/val"] < best_val_loss:
+                best_val_loss = val_metrics["loss/val"]
+                save_checkpoint(model, optimizer, step, os.path.join(args.output_dir, "checkpoint_best.pt"))
             run_generation(
-                model,
+                compiled_model,
                 tokenizer,
                 val_prompts=[args.val_prompt],
                 max_new_tokens=args.max_new_tokens,
@@ -442,6 +485,7 @@ def run_validation(
     limit_val_iters: int = 0,
     global_step: int = 0,
     writer: SummaryWriter = None,
+    precision: torch.dtype = torch.bfloat16,
 ):
     total_loss = 0.0
     model.eval()
@@ -453,10 +497,9 @@ def run_validation(
         ):
             if limit_val_iters > 0 and step >= limit_val_iters:
                 break
-
-            # AMP autocast
-            logits = model(input_tokens)  # (N,seq_len,vocab_size)
-            loss = cross_entropy(logits, label_tokens)
+            with autocast(device_type=val_dataloader.device, dtype=precision):
+                logits = model(input_tokens)  # (N,seq_len,vocab_size)
+                loss = cross_entropy(logits, label_tokens)
             total_loss += loss.detach().item()
 
     avg_loss = total_loss / (1 + step)
@@ -469,7 +512,6 @@ def run_validation(
         if writer is not None:
             writer.add_scalar(key, value, global_step)
 
-    torch.cuda.empty_cache()
     model.train()
     return val_metrics
 
