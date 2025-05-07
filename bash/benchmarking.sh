@@ -9,19 +9,20 @@ conda activate llm
 NUM_WARMUPS=5
 NUM_TRIALS=10
 PRECISION="fp32"
+CONTEXT_LENGTH=128
 
 # Array of model configurations with labels
 declare -a MODELS=(
     # "tiny 512 1344 4 16"
     # "small 768 3072 12 12"
-    # "medium 1024 4096 24 16"
+    "medium 1024 4096 24 16"
     # "large 1280 5120 36 20"
-    "xl 1600 6400 48 25"
-    "2.7B 2560 10240 32 32"
+    # "xl 1600 6400 48 25"
+    # "2.7B 2560 10240 32 32"
 )
 
 # Output directory
-OUTPUT_DIR="/media/bryan/ssd01/expr/llm_from_scratch/benchmarking/question1.1.3b"
+OUTPUT_DIR="/media/bryan/ssd01/expr/llm_from_scratch/benchmarking/question1.1.4"
 mkdir -p $OUTPUT_DIR
 
 # Run benchmark for each configuration
@@ -32,12 +33,30 @@ for MODEL in "${MODELS[@]}"; do
     echo "Running benchmark for $LABEL model..." | tee "$OUTPUT_FILE"
     
     python llm/tools/benchmark_llm.py \
+        --context-length $CONTEXT_LENGTH \
         --precision $PRECISION \
         --num-warmups $NUM_WARMUPS \
         --num-trials $NUM_TRIALS \
         --d-model $D_MODEL \
         --d-ff $D_FF \
         --num-layers $NUM_LAYERS \
-        --num-heads $NUM_HEADS \
-        > "$OUTPUT_FILE" 2>&1
+        --num-heads $NUM_HEADS
+        # > "$OUTPUT_FILE" 2>&1
+    
+    NSYS_OUTPUT="$OUTPUT_DIR/${LABEL}_benchmark"
+    nsys profile -o $NSYS_OUTPUT \
+    --trace=cuda,osrt,nvtx \
+    --force-overwrite=true \
+    python llm/tools/benchmark_llm.py \
+        --context-length $CONTEXT_LENGTH \
+        --precision $PRECISION \
+        --num-warmups $NUM_WARMUPS \
+        --num-trials $NUM_TRIALS \
+        --d-model $D_MODEL \
+        --d-ff $D_FF \
+        --num-layers $NUM_LAYERS \
+        --num-heads $NUM_HEADS
 done
+
+    # --capture-range=cudaProfilerApi \
+    # --capture-range-end=stop \

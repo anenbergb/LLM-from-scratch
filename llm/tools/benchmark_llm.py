@@ -13,6 +13,8 @@ from llm.nn_utils import cross_entropy
 from llm.optimizer import AdamW
 from llm.tools.train_llm import set_all_seeds, load_model
 
+import torch.cuda.nvtx as nvtx
+
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -41,7 +43,7 @@ Run the LLM pre-training.
     parser.add_argument(
         "--num-warmups",
         type=int,
-        default=5,
+        default=10,
         help="Number of warmup steps for benchmarking",
     )
     parser.add_argument(
@@ -95,7 +97,6 @@ Run the LLM pre-training.
         default=False,
         help="Use weight sharing between token embeddings and output layer. Uses the Linear layer weight initialization.",
     )
-
     return parser.parse_args()
 
 
@@ -153,7 +154,7 @@ def benchmark_llm(args):
     times = defaultdict(list)
     for trial in range(args.num_trials):  # Do it multiple times to capture variance
         start_time = timeit.default_timer()
-        with torch.autocast(device_type=device, dtype=precision):
+        with torch.autocast(device_type=device, dtype=precision), nvtx.range("forward"):
             logits = model(random_batch)
         torch.cuda.synchronize()
         end_time = timeit.default_timer()
@@ -163,7 +164,8 @@ def benchmark_llm(args):
 
         try:
             start_time = timeit.default_timer()
-            loss.backward()
+            with nvtx.range("backward"):
+                loss.backward()
             torch.cuda.synchronize()
             end_time = timeit.default_timer()
             times["backward"].append((end_time - start_time) * 1000)
@@ -172,7 +174,8 @@ def benchmark_llm(args):
 
         try:
             start_time = timeit.default_timer()
-            optimizer.step()
+            with nvtx.range("optimizer"):
+                optimizer.step()
             torch.cuda.synchronize()
             end_time = timeit.default_timer()
             times["optimizer"].append((end_time - start_time) * 1000)
