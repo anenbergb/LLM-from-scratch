@@ -72,6 +72,7 @@ python llm/tools/bpe_encode_document.py \
 ```
 
 # Transformer Language Model
+![image](https://github.com/user-attachments/assets/e2ec2635-30d5-4c73-b5f6-0719e38a557f)
 
 We implement an auto-regressive transformer language model following modern best practices, including:
 
