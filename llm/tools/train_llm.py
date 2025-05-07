@@ -23,6 +23,7 @@ from llm.generation import generateLLM
 
 VAL_PROMPTS = [
     "Once upon a time there was a little boy named Ben. Ben loved to",
+    "Once upon a time, there was a pretty girl named Lily. She loved to eat",
 ]
 
 
@@ -130,7 +131,7 @@ Run the LLM pre-training.
     parser.add_argument(
         "--max-lr",
         type=float,
-        default=2e-4,
+        default=1e-3,
         help="maximum learning rate",
     )
     parser.add_argument(

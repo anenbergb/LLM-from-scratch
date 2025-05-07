@@ -65,7 +65,7 @@ class TransformerLM(nn.Module):
         evenly divisible by `num_heads`.
     d_model (int): The dimensionality of the model embeddings and sublayer outputs.
     d_ff (int): Dimensionality of the feed-forward inner layer
-    rope_theta (float): The RoPE $\Theta$ parameter.
+    rope_theta (float): The RoPE Theta parameter.
     device: torch.device | None = None,
     dtype: torch.dtype | None = None
     """
@@ -197,12 +197,12 @@ class TransformerLM(nn.Module):
                 vocab_indices = torch.arange(len(next_token_logits))
 
             if top_p > 0:
-                prob_sort = torch.sort(prob)
+                prob_sort = torch.sort(prob, descending=True)
                 prob_cumsum = torch.cumsum(prob_sort.values, 0)
                 threshold_indices = torch.where(prob_cumsum <= top_p)[0]
                 threshold_index = 0 if len(threshold_indices) == 0 else threshold_indices[-1]
 
-                prob = prob_sort[: threshold_index + 1]
+                prob = prob_sort.values[: threshold_index + 1]
                 top_p_indices = prob_sort.indices[: threshold_index + 1]
                 vocab_indices = vocab_indices[top_p_indices]
 

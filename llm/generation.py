@@ -31,7 +31,7 @@ def generateLLM(
 
     prompt_token_ids = tokenizer.encode(prompt)
     prompt_token_ids_tensor = torch.tensor(prompt_token_ids, dtype=torch.int64, device=device)
-    eos_token_id = tokenizer.encode(eos_token)
+    eos_token_id = tokenizer.encode(eos_token)[0]
 
     with temporary_eval_mode(model), torch.inference_mode():
         generated_token_ids = model.generate(
