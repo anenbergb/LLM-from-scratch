@@ -46,3 +46,6 @@ script was wrapped with `nsys profile -o output_file --trace=cuda,osrt,nvtx` and
 |----------- |-----------|--------|--------------|-------------|----------------|---------------|-----------------|----------------|------------------|-----------------|
 | NO |      1024 |   4096 |           24 |          16 |         88.799 |        36.441 |         103.395 |         25.744 |           49.827 |          18.464 |
 | YES |      1024 |   4096 |           24 |          16 |        101.934 |        34.614 |         143.293 |         32.401 |           89.952 |          21.156 |
+
+The following Nsight Systems application view shows that the NVTX Range Summaries for values such as `forward`, `backward` and `optimizer` agree with the python `timeit.default_timer()` timing. For example, the average time reported in Nsight Systems for the `forward` pass is `101.758 ms` which is very close to the `101.934 ms` measured in python.
+![image](https://github.com/user-attachments/assets/a4cb18bd-da35-47b0-94d0-a14c21a6193c)
