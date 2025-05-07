@@ -23,6 +23,7 @@ dependencies = [
     "ruff",
     "loguru",
     "tensorboard",
+    "tabulate",
 ]
 
 [project.optional-dependencies]

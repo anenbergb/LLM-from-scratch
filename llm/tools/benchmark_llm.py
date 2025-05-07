@@ -7,6 +7,7 @@ import timeit
 from typing import Callable
 import numpy as np
 from collections import defaultdict
+from tabulate import tabulate
 
 from llm.nn_utils import cross_entropy
 from llm.optimizer import AdamW
@@ -29,13 +30,13 @@ Run the LLM pre-training.
     parser.add_argument(
         "--precision",
         type=str,
-        default="bf16",
-        choices=["bf16", "fp32"],
+        default="fp32",
+        choices=["bf16", "fp16", "fp32"],
         help="Precision to use for training.",
     )
     # data loading
-    parser.add_argument("--batch-size", type=int, default=128, help="Training batch size")
-    parser.add_argument("--context-length", type=int, default=256, help="Context length")
+    parser.add_argument("--batch-size", type=int, default=4, help="Training batch size")
+    parser.add_argument("--context-length", type=int, default=32, help="Context length")
 
     parser.add_argument(
         "--num-warmups",
@@ -134,7 +135,7 @@ def benchmark_llm(args):
         precision = torch.float32
     logger.info(f"Using device: {device} and precision: {precision}")
 
-    model = load_model(args, args.vocab_size, device)
+    model = load_model(args, args.vocab_size, device, log_flops_params=False)
     random_batch = torch.randint(
         0, args.vocab_size, (args.batch_size, args.context_length), device=device
     )  # torch.int64
@@ -160,24 +161,43 @@ def benchmark_llm(args):
         with torch.autocast(device_type=device, dtype=precision):
             loss = cross_entropy(logits, random_batch)
 
-        start_time = timeit.default_timer()
-        loss.backward()
-        torch.cuda.synchronize()
-        end_time = timeit.default_timer()
-        times["backward"].append((end_time - start_time) * 1000)
+        try:
+            start_time = timeit.default_timer()
+            loss.backward()
+            torch.cuda.synchronize()
+            end_time = timeit.default_timer()
+            times["backward"].append((end_time - start_time) * 1000)
+        except:
+            times["backward"].append(np.inf)
 
-        start_time = timeit.default_timer()
-        optimizer.step()
-        torch.cuda.synchronize()
-        end_time = timeit.default_timer()
-        times["optimizer"].append((end_time - start_time) * 1000)
+        try:
+            start_time = timeit.default_timer()
+            optimizer.step()
+            torch.cuda.synchronize()
+            end_time = timeit.default_timer()
+            times["optimizer"].append((end_time - start_time) * 1000)
+        except:
+            times["optimizer"].append(np.inf)
         optimizer.zero_grad()
 
-    for key, time_list in times.items():
-        mean_time = float(np.mean(time_list))
-        std_time = float(np.std(time_list))
-        logger.info(f"{key} time: {mean_time:.3f} ± {std_time:.3f} ms over {len(time_list)} runs")
-        # logger.info(f"{key} time per token: {mean_time / (args.batch_size * args.context_length):.2f} ms")
+    data = {
+        "d_model": args.d_model,
+        "d_ff": args.d_ff,
+        "num_layers": args.num_layers,
+        "num_heads": args.num_heads,
+    }
+    # Add timing statistics
+    for key in ["forward", "backward", "optimizer"]:
+        data[f"{key}_mean"] = f"{float(np.mean(times[key])):.3f}"
+        data[f"{key}_std"] = f"{float(np.std(times[key])):.3f}"
+
+    print(
+        tabulate(
+            [data.values()],
+            headers=data.keys(),
+            tablefmt="github",
+        )
+    )
 
 
 if __name__ == "__main__":

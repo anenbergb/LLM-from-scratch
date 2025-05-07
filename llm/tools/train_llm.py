@@ -269,7 +269,7 @@ def load_tokenizer(tokenizer_pickle_path: str, special_tokens: list[str]):
     return tokenizer
 
 
-def load_model(args, vocab_size: int, device: str):
+def load_model(args, vocab_size: int, device: str, log_flops_params: bool = True):
     model = TransformerLM(
         vocab_size=vocab_size,
         context_length=args.context_length,
@@ -290,13 +290,14 @@ def load_model(args, vocab_size: int, device: str):
     logger.info(f"  d_ff: {args.d_ff}")
     logger.info(f"  rope_theta: {args.rope_theta}")
 
-    logger.info("Calculating FLOPs...")
-    with torch.no_grad():
-        in_indices = torch.zeros(1, args.context_length, dtype=torch.int64)
-        flops = FlopCountAnalysis(model, in_indices)
-        logger.info(f"FLOPs: {flops.total() / 1e9:.2f} GFLOPs")  # in billions
+    if log_flops_params:
+        logger.info("Calculating FLOPs...")
+        with torch.no_grad():
+            in_indices = torch.zeros(1, args.context_length, dtype=torch.int64)
+            flops = FlopCountAnalysis(model, in_indices)
+            logger.info(f"FLOPs: {flops.total() / 1e9:.2f} GFLOPs")  # in billions
 
-    logger.info(f"Number of parameters:\n{parameter_count_table(model)}")
+        logger.info(f"Number of parameters:\n{parameter_count_table(model)}")
     return model
 
 
