@@ -134,3 +134,20 @@ https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplic
 
 <img src="https://github.com/user-attachments/assets/a5892ebc-4c10-41d6-bd34-e6960a63e348" width="800"/>
 
+# Triton
+https://openai.com/index/triton/
+
+| Feature                                  | CUDA   | Triton    |
+|------------------------------------------|--------|-----------|
+| Memory coalescing (transfer from DRAM)   | manual | automatic |
+| Shared memory management                 | manual | automatic |
+| Scheduling within SMs                    | manual | automatic |
+| Scheduling across SMs                    | manual | manual    |
+
+- Think about thread blocks rather than threads
+- Triton operates on blocks, CUDA operates on threads.
+- Blocks allows Triton compiler to do other optimizations (e.g., thread coarsening).
+- In Triton, a program instance is a block of threads all running the same program, and these thread blocks can be run in parallel on the GPU. Instead of taking tensors as arguments, we take pointers to their first elements, as well as strides for each tensor that tell us how to move along axes.
+
+References:
+- https://stanford-cs336.github.io/spring2025-lectures/?trace=var/traces/lecture_06.json
