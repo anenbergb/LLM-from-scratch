@@ -67,3 +67,57 @@ The average runtime of `scaled_dot_product_attention` is **1.168 ms**, broken do
 - **Final matmul (AV)**: 50 µs — moderate FLOPs, runs efficiently. Smaller matrix.
 
 Runtime differences do not directly reflect FLOP counts due to variations in memory access patterns, kernel efficiency, and operation type. Softmax, for example, has low computational cost but relatively high runtime due to memory-bound behavior.
+
+### Floating Point Precision
+#### float32
+<img src="https://github.com/user-attachments/assets/765f48c9-157b-4414-a0b7-49dd79ec79f1" width="500"/>
+
+```
+x = torch.zeros(4, 8)
+assert x.dtype == torch.float32  # Default type
+assert x.numel() == 4 * 8
+assert x.element_size() == 4  # Float is 4 bytes
+assert get_memory_usage(x) == 4 * 8 * 4  # 128 bytes
+```
+One matrix in the feedforward layer of GPT-3:
+```
+assert get_memory_usage(torch.empty(12288 * 4, 12288)) == 2304 * 1024 * 1024  # 2.3 GB
+```
+#### float16
+<img src="https://github.com/user-attachments/assets/bc3f9e10-2c89-4867-b764-a7ac5f5c21c0" width="500"/>
+
+```
+x = torch.zeros(4, 8, dtype=torch.float16)
+assert x.element_size() == 2
+However, the dynamic range (especially for small numbers) isn't great.
+x = torch.tensor([1e-8], dtype=torch.float16)
+assert x == 0  # Underflow!
+If this happens when you train, you can get instability.
+```
+
+#### bfloat16
+<img src="https://github.com/user-attachments/assets/f6a843b1-bba1-4d2d-973f-bf62428b57b5" width="500"/>
+
+- Google Brain developed bfloat (brain floating point) in 2018 to address this issue.
+- bfloat16 uses the same memory as float16 but has the same dynamic range as float32!
+- The only catch is that the resolution is worse, but this matters less for deep learning.
+
+```
+ x = torch.tensor([1e-8], dtype=torch.bfloat16)
+assert x != 0  # No underflow!
+```
+
+#### fp8
+<img src="https://github.com/user-attachments/assets/5c886196-15d6-4c82-a63d-78e3313922b6" width="500"/>
+
+- https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html
+- H100s support two variants of FP8: E4M3 (range [-448, 448]) and E5M2 ([-57344, 57344]).
+
+Implications on training:
+- Training with float32 works, but requires lots of memory.
+- Training with fp8, float16 and even bfloat16 is risky, and you can get instability.
+- Solution: use mixed precision training
+
+#### Mixed Precision Training
+- certain operations (e.g., matrix multiplies) are performed in lower-precision datatypes, while other operations that require the full dynamic range of FP32 (e.g., accumulations and reductions) are kept as-is.
+- it is generally a good idea to keep accumulations in higher precision even if the tensors themselves being accumulated have been downcasted.
