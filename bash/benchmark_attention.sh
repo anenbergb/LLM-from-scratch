@@ -10,4 +10,5 @@ python llm/tools/benchmark_attention.py \
 --seq-lens 256 1024 4096 8192 16384 \
 --precision bf16 \
 --num-warmups 10 \
---num-trials 100
+--num-trials 100 \
+--compile

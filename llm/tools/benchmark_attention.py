@@ -32,6 +32,12 @@ def get_args():
         default=None,
         help="If set, save CUDA memory snapshot to this path.",
     )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="Whether to compile the model with torch.compile.",
+    )
 
     return parser.parse_args()
 
@@ -53,6 +59,12 @@ def benchmark_attention(args):
 
     logger.info(f"Using device: {device}, precision: {args.precision}")
 
+    attention_op = (
+        torch.compile(scaled_dot_product_attention, mode="max-autotune")
+        if args.compile
+        else scaled_dot_product_attention
+    )
+
     results = []
 
     for d_model in args.d_models:
@@ -65,7 +77,7 @@ def benchmark_attention(args):
             try:
                 # Warmup
                 for _ in range(args.num_warmups):
-                    out = scaled_dot_product_attention(Q, K, V)
+                    out = attention_op(Q, K, V)
                     _ = out.sum()
                 torch.cuda.synchronize()
 
@@ -73,7 +85,7 @@ def benchmark_attention(args):
                 for _ in range(args.num_trials):
                     torch.cuda.synchronize()
                     start = timeit.default_timer()
-                    out = scaled_dot_product_attention(Q, K, V)
+                    out = attention_op(Q, K, V)
                     torch.cuda.synchronize()
                     end = timeit.default_timer()
                     forward_times.append((end - start) * 1000)
@@ -83,7 +95,7 @@ def benchmark_attention(args):
 
                 # Memory profiling and backward timing
                 torch.cuda.reset_peak_memory_stats()
-                out = scaled_dot_product_attention(Q, K, V)
+                out = attention_op(Q, K, V)
                 loss = out.sum()
                 torch.cuda.synchronize()
                 peak_mem = torch.cuda.max_memory_allocated() / (1024**2)
@@ -96,7 +108,7 @@ def benchmark_attention(args):
             try:
                 backward_times = []
                 for _ in range(args.num_trials):
-                    out = scaled_dot_product_attention(Q, K, V)
+                    out = attention_op(Q, K, V)
                     loss = out.sum()
                     torch.cuda.synchronize()
                     start = timeit.default_timer()

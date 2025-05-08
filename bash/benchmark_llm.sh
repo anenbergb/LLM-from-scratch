@@ -7,7 +7,7 @@ conda activate llm
 
 # Benchmark settings
 NUM_WARMUPS=5
-NUM_TRIALS=10
+NUM_TRIALS=100
 PRECISION="bf16"
 CONTEXT_LENGTH=128
 
@@ -22,7 +22,7 @@ declare -a MODELS=(
 )
 
 # Output directory
-OUTPUT_DIR="/media/bryan/ssd01/expr/llm_from_scratch/benchmarking/question1.1.6"
+OUTPUT_DIR="/media/bryan/ssd01/expr/llm_from_scratch/benchmarking/question1.3"
 mkdir -p $OUTPUT_DIR
 
 # Run benchmark for each configuration
@@ -41,6 +41,7 @@ for MODEL in "${MODELS[@]}"; do
         --d-ff $D_FF \
         --num-layers $NUM_LAYERS \
         --num-heads $NUM_HEADS \
+        --compile \
         > "$OUTPUT_FILE" 2>&1
     
     NSYS_OUTPUT="$OUTPUT_DIR/${LABEL}_benchmark"

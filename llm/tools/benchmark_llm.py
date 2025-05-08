@@ -15,6 +15,7 @@ from llm.optimizer import AdamW
 from llm.tools.train_llm import set_all_seeds, load_model
 
 import torch.cuda.nvtx as nvtx
+from einops._backends import get_backend
 
 
 def get_args() -> argparse.Namespace:
@@ -105,6 +106,13 @@ Benchmark the LLM model by running a forward and backward pass.
         default=False,
         help="Use weight sharing between token embeddings and output layer. Uses the Linear layer weight initialization.",
     )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="Whether to compile the model with torch.compile.",
+    )
+
     return parser.parse_args()
 
 
@@ -125,19 +133,36 @@ def benchmark_llm(args):
         precision = torch.float32
     logger.info(f"Using device: {device} and precision: {precision}")
 
-    model = load_model(args, args.vocab_size, device, log_flops_params=False)
+    # Force backend resolution early
+    get_backend(torch.randn(1))
+
+    model_ = load_model(args, args.vocab_size, device, log_flops_params=False)
     random_batch = torch.randint(
-        0, args.vocab_size, (args.batch_size, args.context_length), device=device
+        0,
+        args.vocab_size,
+        (args.batch_size, args.context_length),
+        device=device,
+        requires_grad=False,
     )  # torch.int64
 
-    optimizer = AdamW(model.parameters())
+    optimizer = AdamW(model_.parameters())
+
+    if args.compile:
+        model = torch.compile(model_, mode="max-autotune", fullgraph=True, dynamic=False)
 
     """Benchmark `func` by running it `num_trials`, and return all the times."""
     # Warmup: first times might be slower due to compilation, things not cached.
     # Since we will run the kernel multiple times, the timing that matters is steady state.
-    with torch.autocast(device_type=device, dtype=precision):
-        for _ in range(args.num_warmups):
-            model(random_batch)
+    for _ in range(args.num_warmups):
+        with torch.autocast(device_type=device, dtype=precision):
+            logits = model(random_batch)
+            loss = cross_entropy(logits, random_batch)
+        try:
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+        except:
+            pass
     torch.cuda.synchronize()
 
     if args.save_memory_profile:
@@ -146,7 +171,7 @@ def benchmark_llm(args):
     times = defaultdict(list)
     for trial in range(args.num_trials):  # Do it multiple times to capture variance
         start_time = timeit.default_timer()
-        with torch.autocast(device_type=device, dtype=precision), nvtx.range("forward"):
+        with torch.autocast(device_type=device, dtype=precision):  #  nvtx.range("forward"):
             logits = model(random_batch)
         torch.cuda.synchronize()
         end_time = timeit.default_timer()
@@ -156,8 +181,8 @@ def benchmark_llm(args):
 
         try:
             start_time = timeit.default_timer()
-            with nvtx.range("backward"):
-                loss.backward()
+            # with nvtx.range("backward"):
+            loss.backward()
             torch.cuda.synchronize()
             end_time = timeit.default_timer()
             times["backward"].append((end_time - start_time) * 1000)
@@ -166,8 +191,8 @@ def benchmark_llm(args):
 
         try:
             start_time = timeit.default_timer()
-            with nvtx.range("optimizer"):
-                optimizer.step()
+            # with nvtx.range("optimizer"):
+            optimizer.step()
             torch.cuda.synchronize()
             end_time = timeit.default_timer()
             times["optimizer"].append((end_time - start_time) * 1000)
