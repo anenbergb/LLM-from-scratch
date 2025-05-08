@@ -20,7 +20,7 @@ import torch.cuda.nvtx as nvtx
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         """
-Run the LLM pre-training.
+Benchmark the LLM model by running a forward and backward pass.
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -108,27 +108,6 @@ Run the LLM pre-training.
     return parser.parse_args()
 
 
-def benchmark(run: Callable, num_warmups: int = 1, num_trials: int = 3) -> float:
-    """Benchmark `func` by running it `num_trials`, and return all the times."""
-    # Warmup: first times might be slower due to compilation, things not cached.
-    # Since we will run the kernel multiple times, the timing that matters is steady state.
-    for _ in range(num_warmups):
-        run()
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()  # Wait for CUDA threads to finish (important!)
-    # Time it for real now!
-    times: list[float] = []
-    for trial in range(num_trials):  # Do it multiple times to capture variance
-        start_time = timeit.default_timer()
-        run()  # Actually perform computation
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()  # Wait for CUDA threads to finish (important!)
-        end_time = timeit.default_timer()
-        times.append((end_time - start_time) * 1000)
-    mean_time = float(np.mean(times))
-    return mean_time
-
-
 def benchmark_llm(args):
     set_all_seeds(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -140,6 +119,8 @@ def benchmark_llm(args):
         if not torch.cuda.is_bf16_supported():
             logger.error("bf16 is not supported on this device. Please use fp16 or fp32.")
             sys.exit(1)
+    elif args.precision == "fp16":
+        precision = torch.float16
     else:
         precision = torch.float32
     logger.info(f"Using device: {device} and precision: {precision}")

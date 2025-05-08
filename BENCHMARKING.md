@@ -168,3 +168,38 @@ torch.cuda.memory._record_memory_history(enabled=None)
 - saves memory_snapshot.pickle that you can load into the following online tool https://pytorch.org/memory_viz to visualize the overall memory usage timeline as well
 as each individual allocation that was made, with its size and a stack trace leading to the code where it
 originates.
+
+# Benchmarking Scaled Dot Product Attention
+
+The following script was run to benchmark the scaled dot product attention
+```
+python llm/tools/benchmark_attention.py \
+--batch-size 8 \
+--d-models 16 32 64 128 \
+--seq-lens 256 1024 4096 8192 16384 \
+--precision bf16 \
+--num-warmups 10 \
+--num-trials 100
+```
+|   d_model |   seq_len |   forward_mean_ms |   forward_std_ms |   backward_mean_ms |   backward_std_ms |   peak_mem_MB |
+|-----------|-----------|-------------------|------------------|--------------------|-------------------|---------------|
+|        16 |       256 |              0.13 |             0.01 |               0.71 |              3.87 |          13.4 |
+|        16 |      1024 |              0.14 |             0.07 |               0.32 |              0.07 |          97.5 |
+|        16 |      4096 |              2.29 |             0.02 |               6.99 |              0.17 |        1301.2 |
+|        16 |      8192 |              8.87 |             0.42 |              29.26 |              2.22 |        5146.6 |
+|        16 |     16384 |             33.92 |             0.95 |             105.11 |              4.26 |       20517   |
+|        32 |       256 |              0.34 |             0.24 |               0.63 |              0.08 |          25.8 |
+|        32 |      1024 |              0.35 |             0.32 |               0.71 |              0.16 |          98.5 |
+|        32 |      4096 |              2.35 |             0.14 |               7.1  |              0.2  |        1305.4 |
+|        32 |      8192 |              8.84 |             0.16 |              27.18 |              1.44 |        5155.6 |
+|        32 |     16384 |             35.09 |             2.01 |             105.13 |              3.58 |       20535   |
+|        64 |       256 |              0.15 |             0.12 |               1.51 |              1.43 |          30.3 |
+|        64 |      1024 |              0.36 |             0.95 |               1.01 |              1.12 |         100.7 |
+|        64 |      4096 |              2.92 |             1.23 |               7.16 |              0.25 |        1313.9 |
+|        64 |      8192 |              9.18 |             0.13 |              27.31 |              1.38 |        5173.6 |
+|        64 |     16384 |             37.04 |             2.38 |             108.13 |              5.13 |       20571   |
+|       128 |       256 |              0.31 |             0.12 |               0.64 |              0.06 |          39.3 |
+|       128 |      1024 |              0.31 |             0.09 |               0.64 |              0.04 |         104.9 |
+|       128 |      4096 |              3.11 |             1.1  |               7.38 |              0.05 |        1330.9 |
+|       128 |      8192 |              9.87 |             0.02 |              28.55 |              1.86 |        5209.6 |
+|       128 |     16384 |             42.05 |             2.43 |             113.17 |              5.27 |       20643   |
