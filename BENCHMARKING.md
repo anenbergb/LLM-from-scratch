@@ -169,6 +169,11 @@ torch.cuda.memory._record_memory_history(enabled=None)
 as each individual allocation that was made, with its size and a stack trace leading to the code where it
 originates.
 
+The active memory timeline for only the forward pass is
+![image](https://github.com/user-attachments/assets/3ce6a2c1-06a2-4f75-a0b9-c3ca7be71c54)
+and the timeline for the full training step (foward, backward, optimizer step)
+![image](https://github.com/user-attachments/assets/4266a3f2-922f-46d7-8637-9e2c45298835)
+
 # Benchmarking Scaled Dot Product Attention
 
 The following script was run to benchmark the scaled dot product attention
