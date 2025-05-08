@@ -1,11 +1,11 @@
 # End-to-End Benchmarking of the Transformer LLM
 All benchmarking is performed on an NVIDIA RTX 5090 GPU with 32 Gb of vRAM
 
-Benchmarking the forward, backward, and optimizer update for the TransformerLM
+Benchmarking the forward, backward, and optimizer update for the TransformerLM at float32
 - batch-size: 4
 - context-length: 128
 - vocabulary-size: 10,000
-- 10 warmup steps, 100 measurement steps
+- 5 warmup steps, 10 measurement steps
 
 |   d_model |   d_model |     d_ff |   num_layers |   num_heads |   forward_mean |   forward_std |   backward_mean |   backward_std |   optimizer_mean |   optimizer_std |
 |----------:|----------:|---------:|-------------:|------------:|---------------:|--------------:|----------------:|---------------:|-----------------:|----------------:|
@@ -121,3 +121,50 @@ Implications on training:
 #### Mixed Precision Training
 - certain operations (e.g., matrix multiplies) are performed in lower-precision datatypes, while other operations that require the full dynamic range of FP32 (e.g., accumulations and reductions) are kept as-is.
 - it is generally a good idea to keep accumulations in higher precision even if the tensors themselves being accumulated have been downcasted.
+
+#### Mixed Precision: LayerNorm vs Feed-Forward Layers
+
+In FP16 mixed precision, Layer Normalization is treated differently due to **numerical instability** in computing mean and variance. These operations are sensitive to:
+- Small differences between large values (risk of cancellation)
+- Precision loss in squaring, summing, and normalization
+
+As a result, FP16 autocasting often runs LayerNorm in **FP32** to maintain stability.
+
+With **BF16**, this precaution is typically unnecessary:
+- BF16 has the same exponent range as FP32, reducing overflow/underflow risk
+- LayerNorm can usually run in BF16 without significant loss of accuracy
+
+> 🧠 LayerNorm is precision-sensitive due to statistics computation. BF16 handles this better than FP16 due to its wider dynamic range.
+
+
+Benchmarking the forward, backward, and optimizer update for the TransformerLM at bfloat16
+- batch-size: 4
+- context-length: 128
+- vocabulary-size: 10,000
+- 5 warmup steps, 10 measurement steps
+
+|   d_model |   d_model |     d_ff |   num_layers |   num_heads |   forward_mean |   forward_std |   backward_mean |   backward_std |   optimizer_mean |   optimizer_std |
+|----------:|----------:|---------:|-------------:|------------:|---------------:|--------------:|----------------:|---------------:|-----------------:|----------------:|
+| tiny    | 512 |   1344 |            4 |          16 |          6.795 |         0.465 |           15.31 |         20.901 |            3.819 |           0.493 |
+| small     |  768 |   3072 |           12 |          12 |         56.518 |        16.073 |         107.934 |          53.93 |           30.995 |          13.005 |
+| medium |      1024 |   4096 |           24 |          16 |         63.071 |         0.867 |          96.169 |         24.091 |           40.205 |           6.164 |
+| large |      1280 |   5120 |           36 |          20 |         114.05 |        59.272 |         144.909 |         31.679 |           60.535 |          10.149 |
+| xl |      1600 |   6400 |           48 |          25 |         123.09 |        49.886 |             inf |            nan |              inf |             nan |
+| 2.7B |      2560 |  10240 |           32 |          32 |         73.141 |        44.009 |         133.101 |         69.393 |              inf |             nan |
+
+### Memory Profiling
+
+```
+... # warm-up phase in your benchmarking script
+
+# Start recording memory history.
+torch.cuda.memory._record_memory_history(max_entries=1000000)
+... # what you want to profile in your benchmarking script
+# Save a pickle file to be loaded by PyTorch's online tool.
+torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+# Stop recording history.
+torch.cuda.memory._record_memory_history(enabled=None)
+```
+- saves memory_snapshot.pickle that you can load into the following online tool https://pytorch.org/memory_viz to visualize the overall memory usage timeline as well
+as each individual allocation that was made, with its size and a stack trace leading to the code where it
+originates.

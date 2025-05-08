@@ -227,59 +227,57 @@ class RotaryPositionalEmbedding(nn.Module):
         return f"context_length={self.cos.shape[0]}, dim/2={self.cos.shape[1]}"
 
 
-# def scaled_dot_product_attention(
-#     Q: Float[Tensor, " ... queries d_k"],
-#     K: Float[Tensor, " ... keys d_k"],
-#     V: Float[Tensor, " ... values d_v"],
-#     mask: Bool[Tensor, " ... queries keys"] | None = None,
-# ) -> Float[Tensor, " ... queries d_v"]:
-#     """
-#     Given key (K), query (Q), and value (V) tensors, return
-#     the output of your scaled dot product attention implementation.
-
-#     Args:
-#         Q (Float[Tensor, " ... queries d_k"]): Query tensor
-#         K (Float[Tensor, " ... keys d_k"]): Key tensor
-#         V (Float[Tensor, " ... values d_v"]): Values tensor
-#         mask (Float[Tensor, " ... queries keys"] | None): Mask tensor
-#             This should be a boolean tensor where
-#                 - `True` indicates that this token should be attended to (not masked)
-#                   The attention probabilities of positions with a mask value of True should collectively sum to 1.
-#                 - `False` indicates that this token should not be attended to (masked)
-#                   The attention probabilities of positions with a mask value of False should be set to 0.
-#     Returns:
-#         Float[Tensor, " ... queries d_v"]: Output of SDPA
-#     """
-#     d_k = K.shape[-1]
-#     scores = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")  # Q @ K^T
-#     scores /= math.sqrt(d_k)
-#     if mask is not None:
-#         scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
-#     attention_weights = softmax(scores, dim=-1)
-#     return einsum(attention_weights, V, "... queries keys, ... keys d_v -> ... queries d_v")
-
-
-import torch.cuda.nvtx as nvtx
-
-
-@nvtx.range("scaled_dot_product_attention")
 def scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
     K: Float[Tensor, " ... keys d_k"],
     V: Float[Tensor, " ... values d_v"],
     mask: Bool[Tensor, " ... queries keys"] | None = None,
 ) -> Float[Tensor, " ... queries d_v"]:
+    """
+    Given key (K), query (Q), and value (V) tensors, return
+    the output of your scaled dot product attention implementation.
+
+    Args:
+        Q (Float[Tensor, " ... queries d_k"]): Query tensor
+        K (Float[Tensor, " ... keys d_k"]): Key tensor
+        V (Float[Tensor, " ... values d_v"]): Values tensor
+        mask (Float[Tensor, " ... queries keys"] | None): Mask tensor
+            This should be a boolean tensor where
+                - `True` indicates that this token should be attended to (not masked)
+                  The attention probabilities of positions with a mask value of True should collectively sum to 1.
+                - `False` indicates that this token should not be attended to (masked)
+                  The attention probabilities of positions with a mask value of False should be set to 0.
+    Returns:
+        Float[Tensor, " ... queries d_v"]: Output of SDPA
+    """
     d_k = K.shape[-1]
-    with nvtx.range("computing attention scores"):
-        scores = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")  # Q @ K^T
-        scores /= math.sqrt(d_k)
+    scores = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")  # Q @ K^T
+    scores /= math.sqrt(d_k)
     if mask is not None:
         scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
-    with nvtx.range("computing softmax"):
-        attention_weights = softmax(scores, dim=-1)
-    with nvtx.range("final matmul"):
-        output = einsum(attention_weights, V, "... queries keys, ... keys d_v -> ... queries d_v")
-    return output
+    attention_weights = softmax(scores, dim=-1)
+    return einsum(attention_weights, V, "... queries keys, ... keys d_v -> ... queries d_v")
+
+
+# import torch.cuda.nvtx as nvtx
+# @nvtx.range("scaled_dot_product_attention")
+# def scaled_dot_product_attention(
+#     Q: Float[Tensor, " ... queries d_k"],
+#     K: Float[Tensor, " ... keys d_k"],
+#     V: Float[Tensor, " ... values d_v"],
+#     mask: Bool[Tensor, " ... queries keys"] | None = None,
+# ) -> Float[Tensor, " ... queries d_v"]:
+#     d_k = K.shape[-1]
+#     with nvtx.range("computing attention scores"):
+#         scores = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")  # Q @ K^T
+#         scores /= math.sqrt(d_k)
+#     if mask is not None:
+#         scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
+#     with nvtx.range("computing softmax"):
+#         attention_weights = softmax(scores, dim=-1)
+#     with nvtx.range("final matmul"):
+#         output = einsum(attention_weights, V, "... queries keys, ... keys d_v -> ... queries d_v")
+#     return output
 
 
 class CausalMHSA(nn.Module):

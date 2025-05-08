@@ -8,6 +8,7 @@ from typing import Callable
 import numpy as np
 from collections import defaultdict
 from tabulate import tabulate
+from torch.profiler import profile
 
 from llm.nn_utils import cross_entropy
 from llm.optimizer import AdamW
@@ -23,6 +24,13 @@ Run the LLM pre-training.
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "--save-memory-profile",
+        type=str,
+        default=None,
+        help="Save memory profile to this file. If not set, no memory profile will be saved.",
+    )
+
     parser.add_argument(
         "--seed",
         type=int,
@@ -151,6 +159,9 @@ def benchmark_llm(args):
             model(random_batch)
     torch.cuda.synchronize()
 
+    if args.save_memory_profile:
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
+
     times = defaultdict(list)
     for trial in range(args.num_trials):  # Do it multiple times to capture variance
         start_time = timeit.default_timer()
@@ -182,6 +193,12 @@ def benchmark_llm(args):
         except:
             times["optimizer"].append(np.inf)
         optimizer.zero_grad()
+
+    if args.save_memory_profile:
+        logger.info(f"Memory profile saved to {args.save_memory_profile}")
+        torch.cuda.memory._dump_snapshot(args.save_memory_profile)
+        # stop recording memory history
+        torch.cuda.memory._record_memory_history(enabled=None)
 
     data = {
         "d_model": args.d_model,
