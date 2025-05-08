@@ -49,3 +49,21 @@ script was wrapped with `nsys profile -o output_file --trace=cuda,osrt,nvtx` and
 
 The following Nsight Systems application view shows that the NVTX Range Summaries for values such as `forward`, `backward` and `optimizer` agree with the python `timeit.default_timer()` timing. For example, the average time reported in Nsight Systems for the `forward` pass is `101.758 ms` which is very close to the `101.934 ms` measured in python.
 ![image](https://github.com/user-attachments/assets/a4cb18bd-da35-47b0-94d0-a14c21a6193c)
+
+- The CUDA kernels that take the most GPU time during the forward pass are `void cutlass::Kernel2`. These kernels are invoked 72 and 24 times.
+- A slightly different kernel, namely the `void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x256_16x3_nt_align4>(T1::Params)` takes the most time in the backward pass.
+- Besides the matrix multiplications, the PyTorch CUDA kernel for copying float data (`direct_copy_kernel_cuda`) takes up a non-trivial amount of runtime.
+```
+Time	Total Time	Instances	Avg	Med	Min	Max	StdDev	Name
+42.1%	3.672 ms	72	51.000 μs	51.232 μs	50.208 μs	51.552 μs	434 ns	void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x128_16x5_tn_align4>(T1::Params)
+15.0%	1.308 ms	24	54.500 μs	54.480 μs	54.240 μs	54.912 μs	206 ns	void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x128_32x3_tn_align4>(T1::Params)
+7.6%	659.137 μs	288	2.288 μs	1.984 μs	1.281 μs	6.336 μs	1.263 μs	void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)
+```
+
+The average runtime of `scaled_dot_product_attention` is **1.168 ms**, broken down as follows:
+
+- **Attention score (QKᵀ)**: 223 µs — compute-intensive, high FLOPs. Larger matrix.
+- **Softmax**: 195 µs — low FLOPs but memory-bound and latency-sensitive. Despite fewer FLOPs, softmax involves nonlinear ops + memory-bound behavior (reads/writes, reduction across a dimension), leading to relatively high runtime per FLOP.
+- **Final matmul (AV)**: 50 µs — moderate FLOPs, runs efficiently. Smaller matrix.
+
+Runtime differences do not directly reflect FLOP counts due to variations in memory access patterns, kernel efficiency, and operation type. Softmax, for example, has low computational cost but relatively high runtime due to memory-bound behavior.
