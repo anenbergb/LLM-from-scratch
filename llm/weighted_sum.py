@@ -200,7 +200,7 @@ class WeightedSumFunc(torch.autograd.Function):
 
         # Launch our kernel with n instances in our 1D grid.
         # define a launch grid of thread blocks
-        weighted_sum_fwd[(triton.cdiv(n_rows, ctx.ROWS_TILE_SIZE),)](  # (32, 16)
+        weighted_sum_fwd[(triton.cdiv(n_rows, ctx.ROWS_TILE_SIZE),)](  # 32 / 16 = 2
             x,
             weight,
             y,

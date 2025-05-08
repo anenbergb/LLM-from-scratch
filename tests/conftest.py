@@ -321,3 +321,7 @@ def pos_ids(n_queries):
 
 # def test_state_dict(ts_state_dict):
 #     print(ts_state_dict)
+
+
+def pytest_addoption(parser):
+    parser.addoption("--snapshot-exact", action="store_true", help="Use exact matching standards for snapshot matching")
