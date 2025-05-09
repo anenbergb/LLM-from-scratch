@@ -138,7 +138,7 @@ def flash_fwd_kernel(
     stride_lq,
     N_QUERIES,
     N_KEYS,
-    scale,
+    scale: tl.constexpr,
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
@@ -157,6 +157,8 @@ def flash_fwd_kernel(
         block_shape=(Q_TILE_SIZE, D),
         order=(1, 0),
     )
+
+    dtype = Q_block_ptr.type.element_ty
 
     # offset parameter specifies the starting point (in terms of indices)
     # of the block block within the larger tensor. It is used to determine
@@ -207,7 +209,7 @@ def flash_fwd_kernel(
         strides=(stride_lq,),
         offsets=(query_tile_index * Q_TILE_SIZE,),
         block_shape=(Q_TILE_SIZE,),
-        order=(1,),
+        order=(0,),
     )
 
     # output = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
@@ -216,36 +218,54 @@ def flash_fwd_kernel(
     Q_tile = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bq, D)
     O_tile = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)  # (Bq, D)
     l_tile = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)  # (Bq,)
-    m_tile = tl.full((Q_TILE_SIZE,), tl.float32("-inf"), dtype=tl.float32)  # (Bq,)
+    m_tile = tl.full((Q_TILE_SIZE,), float("-inf"), dtype=tl.float32)  # (Bq,)
 
-    for _ in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
-        K_tile = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
-        V_tile = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
+    # for _ in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+    for k_offset in range(0, N_KEYS, K_TILE_SIZE):
+        # Adjust K and V block pointers for this tile
+        K_block_ptr_k = K_block_ptr.advance((k_offset, 0))
+        V_block_ptr_k = V_block_ptr.advance((k_offset, 0))
+
+        # mask to prevent reading past N_KEYS
+        # This is optional if padding_option="zero" is enough, but helps with precision
+        # mask = (tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS  # shape (Bk,)
+
+        K_tile = tl.load(K_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
+        V_tile = tl.load(V_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
 
         # Compute the attention scores
         # (Bq, D) @ (Bk, D)^T = (Bq, Bk)
-        scores = tl.dot(Q_tile, K_tile.T) * scale
+        # Triton doesn't yset support compute capability 12.x
+        # scores = tl.dot(Q_tile, K_tile.T) * scale
+
+        # Expand Q_tile to shape (Bq, 1, D)
+        # Expand K_tile to shape (1, Bk, D)
+        # Their product will be shape (Bq, Bk, D)
+        # Then reduce over the last dimension to get (Bq, Bk)
+        scores = tl.sum(Q_tile[:, None, :] * K_tile[None, :, :], axis=2) * scale
 
         row_max = tl.max(scores, axis=-1, keep_dims=False)  # (Bq,)
         new_max = tl.maximum(m_tile, row_max)  # elementwise max
 
         # unnormalized softmax values (numerator)
-        P_j = tl.exp(scores - new_max[..., None])  # (Bq, Bk)
-        row_sum_P_j = tl.sum(P_j, axis=-1, keepdim=False)  # (Bq,)
+        P_j = tl.exp(scores - new_max[:, None])  # (Bq, Bk)
+        row_sum_P_j = tl.sum(P_j, axis=-1, keep_dims=False)  # (Bq,)
         exp_m_diff = tl.exp(m_tile - new_max)  # (Bq,)
         l_tile = exp_m_diff * l_tile + row_sum_P_j  # (Bq,)
 
         # diag(exp_m_diff) * O_tile
-        # P_j (Bq, Bk) * V_tile (Bk, D) = (bs, Bq, D)
-        O_tile = exp_m_diff[..., None] * O_tile + tl.dot(P_j, V_tile)
+        # P_j (Bq, Bk) * V_tile (Bk, D) = (Bq, D)
+        # O_tile = exp_m_diff[:, None] * O_tile + tl.dot(P_j, V_tile.to(tl.float32))
+        O_tile = exp_m_diff[:, None] * O_tile + tl.sum(P_j[:, :, None] * V_tile.to(tl.float32)[None, :, :], axis=1)
+
         m_tile = new_max  # update the max for the next iteration
 
-        K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
-        V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
-
     # diag(l_tile)^-1 * O_tile
-    O_tile = O_tile / l_tile[..., None]
+    O_tile = O_tile / l_tile[:, None]
     L_tile = m_tile + tl.log(l_tile)
+
+    O_tile = O_tile.to(dtype)
+    L_tile = L_tile.to(dtype)
 
     tl.store(O_block_ptr, O_tile, boundary_check=(0, 1))
     tl.store(L_block_ptr, L_tile, boundary_check=(0,))
