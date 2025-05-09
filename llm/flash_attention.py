@@ -49,9 +49,9 @@ class FlashAttentionPytorch(torch.autograd.Function):
         assert V.shape[-2] == num_keys, "V must have the same number of keys as K"
         assert K.shape[0] == V.shape[0] == batch_size, "Q, K, and V must have the same batch size"
 
-        ctx.D_TILE_SIZE = triton.next_power_of_2(D)  # 16 // Roughly 16 loops through the embedding dimension
         Bq = ctx.QUERY_TILE_SIZE = 16  # Bq, Each thread processes 16 batch elements at a time
         Bk = ctx.KEY_TILE_SIZE = 16  # Bk
+        ctx.is_casual = is_casual
 
         # split Q into Tq = ceil(Nq / Bq) tiles of size Bq x D
         # split K into Tk = ceil(Nk / Bk) tiles of size Bk x D
@@ -99,7 +99,171 @@ class FlashAttentionPytorch(torch.autograd.Function):
             logsumexp[:, i : i + Bq] = m_tile + torch.log(l_tile)
 
         ctx.save_for_backward(logsumexp, Q, K, V, output)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Backward pass for FlashAttention.
+        Args:
+            ctx: Context object containing saved information from forward pass.
+            grad_output: Gradient of the output tensor.
+        Returns:
+            Gradients for Q, K, V, and dropout mask.
+        """
+        # Implement the backward pass using FlashAttention
+        raise NotImplementedError("Backward pass not implemented yet.")
+
+
+@triton.jit
+def flash_fwd_kernel(
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    O_ptr,
+    L_ptr,
+    stride_qb,
+    stride_qq,
+    stride_qd,
+    stride_kb,
+    stride_kk,
+    stride_kd,
+    stride_vb,
+    stride_vk,
+    stride_vd,
+    stride_ob,
+    stride_oq,
+    stride_od,
+    stride_lb,
+    stride_lq,
+    N_QUERIES,
+    N_KEYS,
+    scale,
+    D: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,
+    K_TILE_SIZE: tl.constexpr,
+):
+    # Program indices
+    query_tile_index = tl.program_id(0)
+    batch_index = tl.program_id(1)
+
+    # Offset each pointer with the corresponding batch index
+    # multiplied with the batch stride for each tensor
+    Q_block_ptr = tl.make_block_ptr(
+        base=Q_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, D),
+        strides=(stride_qq, stride_qd),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+    )
+
+    # offset parameter specifies the starting point (in terms of indices)
+    # of the block block within the larger tensor. It is used to determine
+    # where the block begins in the memory layout of the tensor.
+    # K_block_ptr block will start at first row and first column of the K tensor
+    # because we will be accumulating intermediate results for the given Q_tile
+
+    # The order parameter defines the memory access pattern for the block.
+    # It specifies the order in which dimensions are traversed when accessing
+    # elements in the block.
+    # order=(1, 0) means that the second dimension (columns) is traversed first,
+    # followed by the first dimension (rows). This is a column-major access pattern.
+    K_block_ptr = tl.make_block_ptr(
+        base=K_ptr + batch_index * stride_kb,
+        shape=(N_KEYS, D),
+        strides=(stride_kk, stride_kd),
+        offsets=(0, 0),
+        block_shape=(K_TILE_SIZE, D),
+        order=(1, 0),
+    )
+
+    V_block_ptr = tl.make_block_ptr(
+        base=V_ptr + batch_index * stride_vb,
+        shape=(N_KEYS, D),
+        strides=(stride_vk, stride_vd),
+        offsets=(0, 0),
+        block_shape=(K_TILE_SIZE, D),
+        order=(1, 0),
+    )
+
+
+class FlashAttention(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, Q, K, V, is_casual=False):
+        """
+        Forward pass for FlashAttention.
+        Args:
+            ctx: Context object to save information for backward pass.
+            Q: Query tensor of shape (batch_size, num_queries, head_dim).
+            K: Key tensor of shape (batch_size, num_keys, head_dim).
+            V: Value tensor of shape (batch_size, num_keys, head_dim).
+            is_casual: If True, use causal attention mask.
+        Returns:
+            Output tensor of shape (batch_size, num_queries, head_dim).
+
+        - save L, Q, K, V, O for the backward pass
+        - returns O
+        """
+
+        assert Q.is_contiguous(), "Our pointer arithmetic will assume contiguous Q"
+        assert K.is_contiguous(), "Our pointer arithmetic will assume contiguous K"
+        assert V.is_contiguous(), "Our pointer arithmetic will assume contiguous V"
+        assert Q.dtype == K.dtype == V.dtype, "Q, K, and V must have the same dtype"
+        assert Q.is_cuda, "FlashAttention requires CUDA"
+        assert Q.device == K.device == V.device, "Q, K, and V must be on the same device"
+        D = Q.shape[-1]
+        num_queries = Q.shape[-2]  # Nq
+        num_keys = K.shape[-2]  # Nk
+        batch_size = Q.shape[0]
+        assert Q.shape[-1] == D == D, "Q, K, and V must have the same last dimension"
+        assert V.shape[-2] == num_keys, "V must have the same number of keys as K"
+        assert K.shape[0] == V.shape[0] == batch_size, "Q, K, and V must have the same batch size"
+
+        Bq = ctx.QUERY_TILE_SIZE = 16  # Bq, Each thread processes 16 batch elements at a time
+        Bk = ctx.KEY_TILE_SIZE = 16  # Bk
         ctx.is_casual = is_casual
+
+        # split Q into Tq = ceil(Nq / Bq) tiles of size Bq x D
+        # split K into Tk = ceil(Nk / Bk) tiles of size Bk x D
+        # split V into Tk = ceil(Nk / Bk) tiles of size Bk x D
+        Tq = triton.cdiv(num_queries / Bq)
+        Tk = triton.cdiv(num_keys / Bk)
+
+        # double check if the dtype should be hardcoded to float32
+        output = torch.empty((batch_size, num_queries, D), device=Q.device, dtype=Q.dtype)
+        logsumexp = torch.empty((batch_size, num_queries), device=Q.device, dtype=Q.dtype)
+
+        scale = 1.0 / math.sqrt(D)
+        # Triton program instance will only load elements from a single batch index
+        # and only read/write to a single query tile of Q, O, L
+        flash_fwd_kernel[(Tq, batch_size)](
+            Q_ptr=Q,
+            K_ptr=K,
+            V_ptr=V,
+            O_ptr=output,
+            L_ptr=logsumexp,
+            stride_qb=Q.stride(0),
+            stride_qq=Q.stride(1),
+            stride_qd=Q.stride(2),
+            stride_kb=K.stride(0),
+            stride_kk=K.stride(1),
+            stride_kd=K.stride(2),
+            stride_vb=V.stride(0),
+            stride_vk=V.stride(1),
+            stride_vd=V.stride(2),
+            stride_ob=output.stride(0),
+            stride_oq=output.stride(1),
+            stride_od=output.stride(2),
+            stride_lb=logsumexp.stride(0),
+            stride_lq=logsumexp.stride(1),
+            N_QUERIES=num_queries,
+            N_KEYS=num_keys,
+            scale=scale,
+            Q_TILE_SIZE=Bq,
+            K_TILE_SIZE=Bk,
+        )
+        ctx.save_for_backward(logsumexp, Q, K, V, output)
         return output
 
     @staticmethod
