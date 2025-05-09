@@ -61,7 +61,7 @@ class FlashAttentionPytorch(torch.autograd.Function):
         logsumexp = torch.empty((batch_size, num_queries), device=Q.device, dtype=Q.dtype)
 
         for i in range(0, num_queries, Bq):
-            Q_tile = Q[:, i : i + Bq, :]  # maybe add .contiguous()
+            Q_tile = Q[:, i : i + Bq, :]
             O_tile = torch.zeros((batch_size, Bq, D), device=Q.device, dtype=Q.dtype)
             # softmax denominator
             l_tile = torch.zeros((batch_size, Bq), device=Q.device, dtype=Q.dtype)
@@ -72,8 +72,8 @@ class FlashAttentionPytorch(torch.autograd.Function):
 
             for j in range(0, num_keys, Bk):
                 # Compute the attention scores
-                K_tile = K[:, j : j + Bk, :]  # .contiguous()
-                V_tile = V[:, j : j + Bk, :]  # .contiguous()
+                K_tile = K[:, j : j + Bk, :]
+                V_tile = V[:, j : j + Bk, :]
 
                 scores = einsum(Q_tile, K_tile, "... queries d_k, ... keys d_k -> ... queries keys")  # Q @ K^T
                 scores /= math.sqrt(D)  # (batch_size, Bq, Bk)
@@ -169,6 +169,8 @@ def flash_fwd_kernel(
     # elements in the block.
     # order=(1, 0) means that the second dimension (columns) is traversed first,
     # followed by the first dimension (rows). This is a column-major access pattern.
+
+    # K of shape (bs, Nk, D) will be split into blocks of size (Bk, D)
     K_block_ptr = tl.make_block_ptr(
         base=K_ptr + batch_index * stride_kb,
         shape=(N_KEYS, D),
@@ -178,6 +180,7 @@ def flash_fwd_kernel(
         order=(1, 0),
     )
 
+    # V of shape (bs, Nk, D) will be split into blocks of size (Bk, D)
     V_block_ptr = tl.make_block_ptr(
         base=V_ptr + batch_index * stride_vb,
         shape=(N_KEYS, D),
@@ -186,6 +189,66 @@ def flash_fwd_kernel(
         block_shape=(K_TILE_SIZE, D),
         order=(1, 0),
     )
+
+    # offset within the output tensor of size (bs, Nq, D)
+    # will only write to a single output tile of size (Q_TILE_SIZE, D)
+    O_block_ptr = tl.make_block_ptr(
+        base=O_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, D),
+        strides=(stride_oq, stride_od),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+    )
+    # offset within the logsumexp tensor of size (bs, Nq)
+    L_block_ptr = tl.make_block_ptr(
+        base=L_ptr + batch_index * stride_lb,
+        shape=(N_QUERIES,),
+        strides=(stride_lq,),
+        offsets=(query_tile_index * Q_TILE_SIZE,),
+        block_shape=(Q_TILE_SIZE,),
+        order=(1,),
+    )
+
+    # output = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
+    # logsumexp = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
+
+    Q_tile = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bq, D)
+    O_tile = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)  # (Bq, D)
+    l_tile = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)  # (Bq,)
+    m_tile = tl.full((Q_TILE_SIZE,), tl.float32("-inf"), dtype=tl.float32)  # (Bq,)
+
+    for _ in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+        K_tile = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
+        V_tile = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
+
+        # Compute the attention scores
+        # (Bq, D) @ (Bk, D)^T = (Bq, Bk)
+        scores = tl.dot(Q_tile, K_tile.T) * scale
+
+        row_max = tl.max(scores, axis=-1, keep_dims=False)  # (Bq,)
+        new_max = tl.maximum(m_tile, row_max)  # elementwise max
+
+        # unnormalized softmax values (numerator)
+        P_j = tl.exp(scores - new_max[..., None])  # (Bq, Bk)
+        row_sum_P_j = tl.sum(P_j, axis=-1, keepdim=False)  # (Bq,)
+        exp_m_diff = tl.exp(m_tile - new_max)  # (Bq,)
+        l_tile = exp_m_diff * l_tile + row_sum_P_j  # (Bq,)
+
+        # diag(exp_m_diff) * O_tile
+        # P_j (Bq, Bk) * V_tile (Bk, D) = (bs, Bq, D)
+        O_tile = exp_m_diff[..., None] * O_tile + tl.dot(P_j, V_tile)
+        m_tile = new_max  # update the max for the next iteration
+
+        K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
+        V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
+
+    # diag(l_tile)^-1 * O_tile
+    O_tile = O_tile / l_tile[..., None]
+    L_tile = m_tile + tl.log(l_tile)
+
+    tl.store(O_block_ptr, O_tile, boundary_check=(0, 1))
+    tl.store(L_block_ptr, L_tile, boundary_check=(0,))
 
 
 class FlashAttention(torch.autograd.Function):
@@ -227,8 +290,7 @@ class FlashAttention(torch.autograd.Function):
         # split Q into Tq = ceil(Nq / Bq) tiles of size Bq x D
         # split K into Tk = ceil(Nk / Bk) tiles of size Bk x D
         # split V into Tk = ceil(Nk / Bk) tiles of size Bk x D
-        Tq = triton.cdiv(num_queries / Bq)
-        Tk = triton.cdiv(num_keys / Bk)
+        Tq = triton.cdiv(num_queries, Bq)
 
         # double check if the dtype should be hardcoded to float32
         output = torch.empty((batch_size, num_queries, D), device=Q.device, dtype=Q.dtype)
@@ -260,6 +322,7 @@ class FlashAttention(torch.autograd.Function):
             N_QUERIES=num_queries,
             N_KEYS=num_keys,
             scale=scale,
+            D=D,
             Q_TILE_SIZE=Bq,
             K_TILE_SIZE=Bk,
         )
@@ -282,17 +345,28 @@ class FlashAttention(torch.autograd.Function):
 
 if __name__ == "__main__":
     # Example usage
-    Q = torch.randn(4, 128, 64, requires_grad=True)
-    K = torch.randn(4, 128, 64, requires_grad=True)
-    V = torch.randn(4, 128, 64, requires_grad=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    Q = torch.randn(4, 128, 64, requires_grad=True, device=device)
+    K = torch.randn(4, 128, 64, requires_grad=True, device=device)
+    V = torch.randn(4, 128, 64, requires_grad=True, device=device)
 
     Q_ref = Q.clone().detach().requires_grad_(True)
     K_ref = K.clone().detach().requires_grad_(True)
     V_ref = V.clone().detach().requires_grad_(True)
 
+    Q_triton = Q.clone().detach().requires_grad_(True)
+    K_triton = K.clone().detach().requires_grad_(True)
+    V_triton = V.clone().detach().requires_grad_(True)
+
     pytorch_out = attention_pytorch(Q_ref, K_ref, V_ref)
 
     flash_pytorch_out = FlashAttentionPytorch.apply(Q, K, V)
 
-    assert torch.allclose(pytorch_out, flash_pytorch_out, atol=1e-2), "Outputs do not match!"
-    print("✅ Outputs match!")
+    flash_triton_out = FlashAttention.apply(Q_triton, K_triton, V_triton)
+
+    assert torch.allclose(pytorch_out, flash_pytorch_out, atol=1e-2), (
+        "Pytorch & FlashAttentionPytorch outputs do not match!"
+    )
+    print("✅ Pytorch & FlashAttentionPytorch outputs match!")
+    assert torch.allclose(pytorch_out, flash_triton_out, atol=1e-2), "Pytorch & Triton outputs do not match!"
+    print("✅ Pytorch & Triton outputs match!")
