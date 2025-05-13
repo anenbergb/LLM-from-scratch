@@ -7,7 +7,7 @@ Benchmarking the forward, backward, and optimizer update for the TransformerLM a
 - vocabulary-size: 10,000
 - 5 warmup steps, 10 measurement steps
 
-|   d_model |   d_model |     d_ff |   num_layers |   num_heads |   forward_mean |   forward_std |   backward_mean |   backward_std |   optimizer_mean |   optimizer_std |
+|   Size |   d_model |     d_ff |   num_layers |   num_heads |   forward_mean |   forward_std |   backward_mean |   backward_std |   optimizer_mean |   optimizer_std |
 |----------:|----------:|---------:|-------------:|------------:|---------------:|--------------:|----------------:|---------------:|-----------------:|----------------:|
 | tiny      |       512 |   1344 |            4 |          16 |         22.704 |         5.313 |          25.165 |         17.579 |           13.211 |           2.184 |
 | small     |       768 |   3072 |           12 |          12 |         57.358 |        15.602 |          64.199 |         31.564 |           38.943 |           8.455 |
@@ -143,7 +143,7 @@ Benchmarking the forward, backward, and optimizer update for the TransformerLM a
 - vocabulary-size: 10,000
 - 5 warmup steps, 10 measurement steps
 
-|   d_model |   d_model |     d_ff |   num_layers |   num_heads |   forward_mean |   forward_std |   backward_mean |   backward_std |   optimizer_mean |   optimizer_std |
+|   Size |   d_model |     d_ff |   num_layers |   num_heads |   forward_mean |   forward_std |   backward_mean |   backward_std |   optimizer_mean |   optimizer_std |
 |----------:|----------:|---------:|-------------:|------------:|---------------:|--------------:|----------------:|---------------:|-----------------:|----------------:|
 | tiny    | 512 |   1344 |            4 |          16 |          6.795 |         0.465 |           15.31 |         20.901 |            3.819 |           0.493 |
 | small     |  768 |   3072 |           12 |          12 |         56.518 |        16.073 |         107.934 |          53.93 |           30.995 |          13.005 |
@@ -249,7 +249,7 @@ Benchmarking the forward, backward, and optimizer update for the TransformerLM a
 Applying `torch.compile` to the full TransformerLM results in faster runtimes
 
 
-|   d_model |   d_model |     d_ff |   num_layers |   num_heads |   forward_mean |   forward_std |   backward_mean |   backward_std |   optimizer_mean |   optimizer_std |
+|   Size |   d_model |     d_ff |   num_layers |   num_heads |   forward_mean |   forward_std |   backward_mean |   backward_std |   optimizer_mean |   optimizer_std |
 |----------:|----------:|---------:|-------------:|------------:|---------------:|--------------:|----------------:|---------------:|-----------------:|----------------:|
 | tiny      |       512 |   1344 |            4 |          16 |          0.935 |          0.02 |           1.827 |          0.024 |             3.29 |           0.041 |
 | small    |       768 |   3072 |           12 |          12 |          2.828 |         0.032 |           6.583 |          0.051 |            9.621 |           0.066 |
