@@ -207,12 +207,14 @@ conda activate llm
 # --max-lr 2e-4 --min-lr 2e-6 \
 # --d-model 1280 --d-ff 5120 --num-layers 36 --num-heads 20
 
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 python llm/tools/train_llm.py \
 --train-dataset /media/bryan/ssd01/expr/llm_from_scratch/tokenization/owt_train.npy \
 --val-dataset /media/bryan/ssd01/expr/llm_from_scratch/tokenization/owt_valid.npy \
 --tokenized-dataset-pickle /media/bryan/ssd01/expr/llm_from_scratch/tokenization/bpe_32k_owt_train.pkl \
 --output-dir /media/bryan/ssd01/expr/llm_from_scratch/owl-model-size/medium-500k-lr5e-4 \
---resume-from-checkpoint /media/bryan/ssd01/expr/llm_from_scratch/owl-model-size/medium-500k-lr5e-4/checkpoint_50000.pt \
+--resume-from-checkpoint /media/bryan/ssd01/expr/llm_from_scratch/owl-model-size/medium-500k-lr5e-4/checkpoint_130000.pt \
 --lr-warmup-iters 10000 \
 --max-train-iters 500000 \
 --evaluation-iters 20000 \

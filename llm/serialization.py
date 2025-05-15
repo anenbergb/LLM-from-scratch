@@ -19,14 +19,22 @@ def save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
+    # Move model parameters to CPU before saving
+    model_cpu_state = {k: v.cpu() for k, v in model.state_dict().items()}
+    optimizer_cpu_state = {
+        k: {ik: iv.cpu() if torch.is_tensor(iv) else iv for ik, iv in v.items()} if isinstance(v, dict) else v
+        for k, v in optimizer.state_dict().items()
+    }
+
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
+            "model_state_dict": model_cpu_state,
+            "optimizer_state_dict": optimizer_cpu_state,
             "iteration": iteration,
         },
         out,
     )
+    torch.cuda.empty_cache()  # Free unused cached GPU memory
 
 
 def load_checkpoint(
@@ -47,7 +55,9 @@ def load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    checkpoint = torch.load(src)
+    device = next(model.parameters()).device
+    checkpoint = torch.load(src, map_location=device)
+
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return checkpoint["iteration"]
