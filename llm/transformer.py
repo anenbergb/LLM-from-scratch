@@ -102,6 +102,10 @@ class TransformerLM(nn.Module):
         # weight sharing / weight tying
         if weight_sharing:
             self.token_embeddings.weight = self.lm_head.weight
+            # This replaces self.token_embeddings.weight with a reference (alias) to self.lm_head.weight. So now:
+            # - self.token_embeddings.weight and self.lm_head.weight point to the same underlying tensor.
+            # - Only token_embeddings.weight is registered as a parameter because lm_head.weight is no longer
+            #   considered a "real" parameter in the model — it has no Parameter field directly attached anymore.
 
     def forward(
         self,

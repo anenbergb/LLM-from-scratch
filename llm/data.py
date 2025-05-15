@@ -66,6 +66,7 @@ class SequentialValidationDataset(IterableDataset):
         context_length: int,
         batch_size: int,
         device: str = "cpu",
+        drop_last: bool = False,
     ):
         """
         IterableDataset that yields sequential non-overlapping batches from a 1D tokenized dataset.
@@ -75,11 +76,13 @@ class SequentialValidationDataset(IterableDataset):
             context_length: Length of each sequence.
             batch_size: Number of sequences per batch.
             device: Device to move tensors to.
+            drop_last: If True, drop the last batch if it's smaller than batch_size.
         """
         self.dataset = dataset
         self.context_length = context_length
         self.batch_size = batch_size
         self.device = device
+        self.drop_last = drop_last
 
         self.total_tokens = len(dataset)
         self.num_sequences = (self.total_tokens - 1) // context_length
@@ -88,7 +91,10 @@ class SequentialValidationDataset(IterableDataset):
         """
         Returns the number of batches in the dataset.
         """
-        return (self.num_sequences - 1) // self.batch_size + 1
+        total_batches = self.num_sequences // self.batch_size
+        if not self.drop_last and self.num_sequences % self.batch_size != 0:
+            total_batches += 1
+        return total_batches
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         # Generate all sequences
@@ -108,8 +114,14 @@ class SequentialValidationDataset(IterableDataset):
 
         # Yield in batches
         for i in range(0, len(all_x), self.batch_size):
-            xb = torch.from_numpy(all_x[i : i + self.batch_size]).to(dtype=torch.int64)
-            yb = torch.from_numpy(all_y[i : i + self.batch_size]).to(dtype=torch.int64)
+            xb_np = all_x[i : i + self.batch_size]
+            yb_np = all_y[i : i + self.batch_size]
+
+            if self.drop_last and len(xb_np) < self.batch_size:
+                break
+
+            xb = torch.from_numpy(xb_np).to(dtype=torch.int64)
+            yb = torch.from_numpy(yb_np).to(dtype=torch.int64)
 
             if "cuda" in self.device:
                 xb = xb.pin_memory().to(self.device, non_blocking=True)

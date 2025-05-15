@@ -82,6 +82,12 @@ Run the LLM pre-training.
         "Training will resume from the iteration that was saved in the checkpoint. ",
     )
     parser.add_argument(
+        "--log-iters",
+        type=int,
+        default=10,
+        help="Log every N iterations",
+    )
+    parser.add_argument(
         "--checkpoint-iters",
         type=int,
         default=10000,
@@ -225,13 +231,13 @@ Run the LLM pre-training.
     parser.add_argument(
         "--top-k",
         type=int,
-        default=10,
+        default=15,
         help="Top-k sampling for text generation",
     )
     parser.add_argument(
         "--top-p",
         type=float,
-        default=0.0,
+        default=0.95,
         help="Top-p (nucleus) sampling for text generation",
     )
 
@@ -323,6 +329,11 @@ def train(args):
                 "Deleting the content of the output directory."
             )
             delete_output_dir(args.output_dir)
+        elif args.resume_from_checkpoint:
+            logger.info(
+                f"Output directory ({args.output_dir}) already exists and resume_from_checkpoint is set. "
+                "Resuming from checkpoint."
+            )
         else:
             logger.error(
                 f"Output directory ({args.output_dir}) already exists and overwrite_output_dir is set to False. "
@@ -371,7 +382,7 @@ def train(args):
         dynamic=False,  # tell TorchDynamo shapes may change
     )
 
-    logger.info(f"Training for {args.max_train_iters} iterations")
+    logger.info(f"Training from {start_iter} to {args.max_train_iters} iterations")
     logger.info(f"Evaluation every {args.evaluation_iters} iterations")
     logger.info(f"Training dataset contains {len(train_dataset)} tokens")
     logger.info(f"Validation dataset contains {len(val_dataset)} tokens")
@@ -383,14 +394,17 @@ def train(args):
     logger.info(f"Only keep the last {args.num_checkpoints} checkpoints")
 
     train_dataloader = random_training_iterator(
-        train_dataset, args.batch_size, args.context_length, device, args.max_train_iters
+        train_dataset, args.batch_size, args.context_length, device, args.max_train_iters - start_iter
     )
-    val_dataloader = SequentialValidationDataset(val_dataset, args.context_length, args.val_batch_size, device=device)
+    val_dataloader = SequentialValidationDataset(
+        val_dataset, args.context_length, args.val_batch_size, device=device, drop_last=True
+    )
 
     best_val_loss = float("inf")
     for step, batch in (
         progress_bar := tqdm(
             enumerate(train_dataloader, start=start_iter),
+            initial=start_iter,
             total=args.max_train_iters,
             desc="Training",
         )
@@ -416,19 +430,20 @@ def train(args):
             "perplexity/train": perplexity.detach().item(),
             "lr": lr,
         }
-        progress_bar.set_postfix(**logs)
-        writer.add_scalar("loss/train", loss.detach().item(), step)
-        writer.add_scalar("perplexity/train", perplexity.detach().item(), step)
-        writer.add_scalar("learning_rate", lr, step)
-        writer.add_scalar("grad_norm", total_norm, step)
+        if step % args.log_iters == 0:
+            progress_bar.set_postfix(**logs)
+            writer.add_scalar("loss/train", loss.detach().item(), step)
+            writer.add_scalar("perplexity/train", perplexity.detach().item(), step)
+            writer.add_scalar("learning_rate", lr, step)
+            writer.add_scalar("grad_norm", total_norm, step)
 
-        if step > 0 and (step % args.checkpoint_iters == 0 or step == args.max_train_iters - 1):
-            checkpoint_path = os.path.join(args.output_dir, f"checkpoint_{step}.pt")
+        if step > 0 and ((step + 1) % args.checkpoint_iters == 0 or step == args.max_train_iters - 1):
+            checkpoint_path = os.path.join(args.output_dir, f"checkpoint_{step + 1}.pt")
             logger.info(f"Saving checkpoint to {checkpoint_path}")
             save_checkpoint(
                 model,
                 optimizer,
-                step,
+                step + 1,
                 checkpoint_path,
             )
             checkpoint_paths.append(checkpoint_path)
@@ -441,9 +456,10 @@ def train(args):
                 except Exception as e:
                     logger.warning(f"Failed to delete old checkpoint {oldest}: {e}")
 
-        if step > 0 and (step % args.evaluation_iters == 0 or step == args.max_train_iters - 1):
+        if step > 0 and ((step + 1) % args.evaluation_iters == 0 or step == args.max_train_iters - 1):
+            # step + 1 because the training step has already occurred
             print_str = (
-                f"Training metrics [Iteration {step}]: "
+                f"Training metrics [Iteration {step + 1}]: "
                 f"loss = {logs['loss/train']:.2f}, perplexity = {logs['perplexity/train']:.2f}, lr = {lr:.4e}, "
             )
             logger.info(print_str)
@@ -451,18 +467,18 @@ def train(args):
                 compiled_model,
                 val_dataloader,
                 limit_val_iters=args.limit_val_iters,
-                global_step=step,
+                global_step=step + 1,
                 writer=writer,
                 precision=precision,
             )
             val_print_str = (
-                f"Validation metrics [Iteration {step}]: "
+                f"Validation metrics [Iteration {step + 1}]: "
                 f"loss = {val_metrics['loss/val']:.2f}, perplexity = {val_metrics['perplexity/val']:.2f}"
             )
             logger.info(val_print_str)
             if val_metrics["loss/val"] < best_val_loss:
                 best_val_loss = val_metrics["loss/val"]
-                save_checkpoint(model, optimizer, step, os.path.join(args.output_dir, "checkpoint_best.pt"))
+                save_checkpoint(model, optimizer, step + 1, os.path.join(args.output_dir, "checkpoint_best.pt"))
             run_generation(
                 compiled_model,
                 tokenizer,
@@ -473,7 +489,7 @@ def train(args):
                 top_p=args.top_p,
                 seed=args.seed,
                 device=device,
-                global_step=step,
+                global_step=step + 1,
                 writer=writer,
             )
 
@@ -515,6 +531,7 @@ def run_validation(
             writer.add_scalar(key, value, global_step)
 
     model.train()
+    torch.cuda.empty_cache()
     return val_metrics
 
 
