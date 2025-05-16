@@ -34,7 +34,6 @@ def save_checkpoint(
         },
         out,
     )
-    torch.cuda.empty_cache()  # Free unused cached GPU memory
 
 
 def load_checkpoint(

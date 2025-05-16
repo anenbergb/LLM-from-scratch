@@ -446,6 +446,9 @@ def train(args):
                 step + 1,
                 checkpoint_path,
             )
+            torch._dynamo.reset()  # clears compiled graph cache
+            torch.cuda.empty_cache()
+
             checkpoint_paths.append(checkpoint_path)
 
             if len(checkpoint_paths) > args.num_checkpoints:
@@ -479,6 +482,9 @@ def train(args):
             if val_metrics["loss/val"] < best_val_loss:
                 best_val_loss = val_metrics["loss/val"]
                 save_checkpoint(model, optimizer, step + 1, os.path.join(args.output_dir, "checkpoint_best.pt"))
+                torch._dynamo.reset()  # clears compiled graph cache
+                torch.cuda.empty_cache()
+
             run_generation(
                 compiled_model,
                 tokenizer,
