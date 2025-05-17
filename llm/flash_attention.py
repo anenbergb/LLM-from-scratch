@@ -109,7 +109,7 @@ class FlashAttentionPytorch(torch.autograd.Function):
             output[:, i : i + Bq, :] = O_tile / l_tile[..., None]
             logsumexp[:, i : i + Bq] = m_tile + torch.log(l_tile)
 
-        ctx.save_for_backward(logsumexp, Q, K, V, output)
+        ctx.save_for_backward(Q, K, V, logsumexp, output)
         return output
 
     @staticmethod
@@ -223,30 +223,27 @@ def flash_fwd_kernel(
         order=(0,),
     )
 
-    # output = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
-    # logsumexp = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
-
     Q_tile = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bq, D)
     O_tile = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)  # (Bq, D)
-    l_tile = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)  # (Bq,)
+    l_tile = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)  # (Bq,) log(sum(exp(Scores_ij))
     m_tile = tl.full((Q_TILE_SIZE,), float("-inf"), dtype=tl.float32)  # (Bq,)
 
-    # for _ in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
-    for k_offset in range(0, N_KEYS, K_TILE_SIZE):
+    # easier compiler to unroll and optimize the loop
+    for tile_idx in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+        k_offset = tile_idx * K_TILE_SIZE
         # Adjust K and V block pointers for this tile
         K_block_ptr_k = K_block_ptr.advance((k_offset, 0))
         V_block_ptr_k = V_block_ptr.advance((k_offset, 0))
 
-        # mask to prevent reading past N_KEYS
-        # This is optional if padding_option="zero" is enough, but helps with precision
-        # mask = (tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS  # shape (Bk,)
-
+        # inserts a 0.0 for any out-of-bounds elements to avoid reading past N_KEY
         K_tile = tl.load(K_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
         V_tile = tl.load(V_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
 
-        # Compute the attention scores
+        # mask to prevent reading past N_KEY
+        mask = (tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS  # shape: (Bk,)
+        # Compute the attention scores, ensuringi that invalid elements are masked
         # (Bq, D) @ (Bk, D)^T = (Bq, Bk)
-        scores = tl.dot(Q_tile, K_tile.T) * scale
+        scores = tl.where(mask[None, :], tl.dot(Q_tile, K_tile.T).to(tl.float32) * scale, float("-inf"))
 
         row_max = tl.max(scores, axis=-1, keep_dims=False)  # (Bq,)
         new_max = tl.maximum(m_tile, row_max)  # elementwise max
@@ -265,7 +262,7 @@ def flash_fwd_kernel(
 
     # diag(l_tile)^-1 * O_tile
     O_tile = O_tile / l_tile[:, None]
-    L_tile = m_tile + tl.log(l_tile)
+    L_tile = m_tile + tl.log(l_tile)  # logsumexp
 
     O_tile = O_tile.to(dtype)
     L_tile = L_tile.to(dtype)
@@ -315,7 +312,6 @@ class FlashAttention(torch.autograd.Function):
         # split V into Tk = ceil(Nk / Bk) tiles of size Bk x D
         Tq = triton.cdiv(num_queries, Bq)
 
-        # double check if the dtype should be hardcoded to float32
         output = torch.empty((batch_size, num_queries, D), device=Q.device, dtype=Q.dtype)
         logsumexp = torch.empty((batch_size, num_queries), device=Q.device, dtype=Q.dtype)
 
@@ -349,7 +345,7 @@ class FlashAttention(torch.autograd.Function):
             Q_TILE_SIZE=Bq,
             K_TILE_SIZE=Bk,
         )
-        ctx.save_for_backward(logsumexp, Q, K, V, output)
+        ctx.save_for_backward(Q, K, V, logsumexp, output)
         return output
 
     @staticmethod
