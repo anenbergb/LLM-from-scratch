@@ -7,6 +7,27 @@ The project was inspired by [assignment #1 of Stanford CS336](https://github.com
 ```
 pip install -e .
 ```
+### Triton support
+It's necessary to install `triton` from source in order to enable `triton` support on the latest NVIDIA Blackwell GPUs (e.g. RTX 5090) with compute capability 120.
+
+
+When Triton builds its C++/CUDA backends, it links against the libstdc++.so.6 from the GCC that did the build — typically the system's /usr/lib/...
+
+If you're working within a Conda environment, you should first install and use a Conda-managed GCC
+```
+conda install -c conda-forge gxx_linux-64 gcc_linux-64
+export CC=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-cc
+export CXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-c++
+```
+and then follow the installation instructions https://github.com/triton-lang/triton
+```
+git clone https://github.com/triton-lang/triton.git
+cd triton
+
+pip install -r python/requirements.txt # build-time dependencies
+pip install -e 
+```
+
 
 ### Run unit tests
 

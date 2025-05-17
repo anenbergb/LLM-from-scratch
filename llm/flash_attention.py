@@ -5,6 +5,11 @@ import math
 import triton
 import triton.language as tl
 
+"""
+References:
+- https://docs.pytorch.org/docs/stable/notes/extending.html#extending-torch-autograd
+"""
+
 
 def attention_pytorch(Q, K, V, is_casual=False):
     d_k = K.shape[-1]
@@ -20,6 +25,12 @@ def attention_pytorch(Q, K, V, is_casual=False):
 
 
 class FlashAttentionPytorch(torch.autograd.Function):
+    """
+    The forward method combines forward() and setup_context() because
+    it's necessary to store the the intermediate logsumexp tensor
+    for the backward pass.
+    """
+
     @staticmethod
     def forward(ctx, Q, K, V, is_casual=False):
         """
@@ -235,14 +246,7 @@ def flash_fwd_kernel(
 
         # Compute the attention scores
         # (Bq, D) @ (Bk, D)^T = (Bq, Bk)
-        # Triton doesn't yset support compute capability 12.x
-        # scores = tl.dot(Q_tile, K_tile.T) * scale
-
-        # Expand Q_tile to shape (Bq, 1, D)
-        # Expand K_tile to shape (1, Bk, D)
-        # Their product will be shape (Bq, Bk, D)
-        # Then reduce over the last dimension to get (Bq, Bk)
-        scores = tl.sum(Q_tile[:, None, :] * K_tile[None, :, :], axis=2) * scale
+        scores = tl.dot(Q_tile, K_tile.T) * scale
 
         row_max = tl.max(scores, axis=-1, keep_dims=False)  # (Bq,)
         new_max = tl.maximum(m_tile, row_max)  # elementwise max
@@ -255,8 +259,7 @@ def flash_fwd_kernel(
 
         # diag(exp_m_diff) * O_tile
         # P_j (Bq, Bk) * V_tile (Bk, D) = (Bq, D)
-        # O_tile = exp_m_diff[:, None] * O_tile + tl.dot(P_j, V_tile.to(tl.float32))
-        O_tile = exp_m_diff[:, None] * O_tile + tl.sum(P_j[:, :, None] * V_tile.to(tl.float32)[None, :, :], axis=1)
+        O_tile = exp_m_diff[:, None] * O_tile + tl.dot(P_j, V_tile.to(tl.float32))
 
         m_tile = new_max  # update the max for the next iteration
 
@@ -370,15 +373,15 @@ if __name__ == "__main__":
     K = torch.randn(4, 128, 64, requires_grad=True, device=device)
     V = torch.randn(4, 128, 64, requires_grad=True, device=device)
 
-    Q_ref = Q.clone().detach().requires_grad_(True)
-    K_ref = K.clone().detach().requires_grad_(True)
-    V_ref = V.clone().detach().requires_grad_(True)
+    Q_pt = Q.clone().detach().requires_grad_(True)
+    K_pt = K.clone().detach().requires_grad_(True)
+    V_pt = V.clone().detach().requires_grad_(True)
 
     Q_triton = Q.clone().detach().requires_grad_(True)
     K_triton = K.clone().detach().requires_grad_(True)
     V_triton = V.clone().detach().requires_grad_(True)
 
-    pytorch_out = attention_pytorch(Q_ref, K_ref, V_ref)
+    pytorch_out = attention_pytorch(Q_pt, K_pt, V_pt)
 
     flash_pytorch_out = FlashAttentionPytorch.apply(Q, K, V)
 
