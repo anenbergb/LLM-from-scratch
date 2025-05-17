@@ -153,6 +153,7 @@ def flash_fwd_kernel(
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
+    is_casual: tl.constexpr,
 ):
     # Program indices
     query_tile_index = tl.program_id(0)
@@ -240,10 +241,17 @@ def flash_fwd_kernel(
         V_tile = tl.load(V_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
 
         # mask to prevent reading past N_KEY
-        mask = (tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS  # shape: (Bk,)
-        # Compute the attention scores, ensuringi that invalid elements are masked
+        mask = ((tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS)[None, :]  # shape: (1, Bk)
+
+        if is_casual:
+            # causal mask should be of shape (Bq, Bk)
+            query_indices = tl.arange(0, Q_TILE_SIZE) + query_tile_index * Q_TILE_SIZE
+            key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
+            mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
+
+        # Compute the attention scores, ensuring that invalid elements are masked
         # (Bq, D) @ (Bk, D)^T = (Bq, Bk)
-        scores = tl.where(mask[None, :], tl.dot(Q_tile, K_tile.T).to(tl.float32) * scale, float("-inf"))
+        scores = tl.where(mask, tl.dot(Q_tile, K_tile.T).to(tl.float32) * scale, float("-inf"))
 
         row_max = tl.max(scores, axis=-1, keep_dims=False)  # (Bq,)
         new_max = tl.maximum(m_tile, row_max)  # elementwise max
@@ -344,6 +352,7 @@ class FlashAttention(torch.autograd.Function):
             D=D,
             Q_TILE_SIZE=Bq,
             K_TILE_SIZE=Bk,
+            is_casual=is_casual,
         )
         ctx.save_for_backward(Q, K, V, logsumexp, output)
         return output
