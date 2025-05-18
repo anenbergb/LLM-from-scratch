@@ -310,6 +310,135 @@ def flash_fwd_kernel(
     tl.store(O_block_ptr, O_tile, boundary_check=(0, 1))
     tl.store(L_block_ptr, L_tile, boundary_check=(0,))
 
+@triton.jit
+def flash_bwd_kernel(
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    O_ptr,
+    L_ptr,
+    dO_ptr,
+    dQ_ptr,
+    dK_ptr,
+    dV_ptr,
+    stride_qb,
+    stride_qq,
+    stride_qd,
+    stride_kb,
+    stride_kk,
+    stride_kd,
+    stride_vb,
+    stride_vk,
+    stride_vd,
+    stride_ob,
+    stride_oq,
+    stride_od,
+    stride_lb,
+    stride_lq,
+    stride_db,
+    stride_dq,
+    N_QUERIES,
+    N_KEYS,
+    scale: tl.constexpr,
+    head_dim: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,
+    K_TILE_SIZE: tl.constexpr,
+    is_casual: tl.constexpr,
+):
+    """
+    Backward pass kernel for FlashAttention.
+    This kernel computes the gradients for Q, K, and V tensors.
+
+    Q: Query tensor of shape (batch_size, num_queries, head_dim).
+    K: Key tensor of shape (batch_size, num_keys, head_dim).
+    V: Value tensor of shape (batch_size, num_keys, head_dim).
+    is_casual: If True, use causal attention mask.
+    logsumexp: of shape (batch_size, num_queries)
+    output: of shape (batch_size, num_queries, head_dim)
+
+    grad_output: of shape (batch_size, num_queries, head_dim)
+    """
+    # Program indices
+    key_tile_index = tl.program_id(0)
+    batch_index = tl.program_id(1)
+
+    # Offset each pointer with the corresponding batch index
+    # multiplied with the batch stride for each tensor
+    Q_block_ptr = tl.make_block_ptr(
+        base=Q_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, head_dim),
+        strides=(stride_qq, stride_qd),
+        offsets=(0, 0),
+        block_shape=(Q_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+
+    dtype = Q_block_ptr.type.element_ty
+
+    # K of shape (bs, Nk, d) will be split into blocks of size (Bk, d)
+    K_block_ptr = tl.make_block_ptr(
+        base=K_ptr + batch_index * stride_kb,
+        shape=(N_KEYS, head_dim),
+        strides=(stride_kk, stride_kd),
+        offsets=(key_tile_index * K_TILE_SIZE, 0),
+        block_shape=(K_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+
+    # V of shape (bs, Nk, d) will be split into blocks of size (Bk, d)
+    V_block_ptr = tl.make_block_ptr(
+        base=V_ptr + batch_index * stride_vb,
+        shape=(N_KEYS, head_dim),
+        strides=(stride_vk, stride_vd),
+        offsets=(key_tile_index * K_TILE_SIZE, 0),
+        block_shape=(K_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+
+    # offset within the output tensor of size (bs, Nq, d)
+    # will only write to a single output tile of size (Q_TILE_SIZE, d)
+    O_block_ptr = tl.make_block_ptr(
+        base=O_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, head_dim),
+        strides=(stride_oq, stride_od),
+        offsets=(0, 0),
+        block_shape=(Q_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+    # offset within the logsumexp tensor of size (bs, Nq)
+    L_block_ptr = tl.make_block_ptr(
+        base=L_ptr + batch_index * stride_lb,
+        shape=(N_QUERIES,),
+        strides=(stride_lq,),
+        offsets=(0,),
+        block_shape=(Q_TILE_SIZE,),
+        order=(0,),
+    )
+    # offset within the grad_output tensor of size (bs, Nq, d)
+    dO_block_ptr = tl.make_block_ptr(
+        base=dO_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, head_dim),
+        strides=(stride_oq, stride_od),
+        offsets=(0, 0),
+        block_shape=(Q_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+
+    for tile_idx in range(tl.cdiv(N_QUERIES, Q_TILE_SIZE)):
+        q_offset = tile_idx * Q_TILE_SIZE
+        # Adjust Q block pointers for this tile
+        Q_block_ptr_q = Q_block_ptr.advance((q_offset, 0))
+
+        D_block_ptr_q = D_block_ptr.advance((q_offset,))
+        dO_block_ptr_q = dO_block_ptr.advance((q_offset, 0))
+
+        # inserts a 0.0 for any out-of-bounds elements to avoid reading past N_QUERIES
+        Q_tile = tl.load(Q_block_ptr_q, boundary_check=(0, 1), padding_option="zero")
+
+
+        # D = torch.sum(output * grad_output, dim=-1, keepdim=False) # (bs, queries)
+
+
 
 class FlashAttention(torch.autograd.Function):
     @staticmethod
@@ -398,9 +527,67 @@ class FlashAttention(torch.autograd.Function):
             grad_output: Gradient of the output tensor.
         Returns:
             Gradients for Q, K, V, and dropout mask.
+    
+        Q: Query tensor of shape (batch_size, num_queries, head_dim).
+        K: Key tensor of shape (batch_size, num_keys, head_dim).
+        V: Value tensor of shape (batch_size, num_keys, head_dim).
+        is_casual: If True, use causal attention mask.
+        logsumexp: of shape (batch_size, num_queries)
+        output: of shape (batch_size, num_queries, head_dim)
+
+        grad_output: of shape (batch_size, num_queries, head_dim)
+    
         """
-        # Implement the backward pass using FlashAttention
-        raise NotImplementedError("Backward pass not implemented yet.")
+        Q, K, V, logsumexp, output = ctx.saved_tensors
+        is_casual = ctx.is_casual
+        Bq = ctx.QUERY_TILE_SIZE
+        Bk = ctx.KEY_TILE_SIZE
+        batch_size, num_queries, head_dim = Q.shape
+        num_keys = K.shape[-2]
+
+        Tq = triton.cdiv(num_queries, Bq) # number of query tiles
+        Tk = triton.cdiv(num_keys, Bk) # number of key tiles
+
+        scale = 1.0 / math.sqrt(head_dim)
+
+        dQ = torch.empty_like(Q)
+        dK = torch.empty_like(K)
+        dV = torch.empty_like(V)
+
+        flash_bwd_kernel[(Tk, batch_size)](
+            Q_ptr=Q,
+            K_ptr=K,
+            V_ptr=V,
+            O_ptr=output,
+            L_ptr=logsumexp,
+            dO_ptr=grad_output,
+            dQ_ptr=dQ,
+            dK_ptr=dK,  # Placeholder for dK
+            dV_ptr=dV,  # Placeholder for dV
+            stride_qb=Q.stride(0),
+            stride_qq=Q.stride(1),
+            stride_qd=Q.stride(2),
+            stride_kb=K.stride(0),
+            stride_kk=K.stride(1),
+            stride_kd=K.stride(2),
+            stride_vb=V.stride(0),
+            stride_vk=V.stride(1),
+            stride_vd=V.stride(2),
+            stride_ob=output.stride(0),
+            stride_oq=output.stride(1),
+            stride_od=output.stride(2),
+            stride_lb=logsumexp.stride(0),
+            stride_lq=logsumexp.stride(1),
+            N_QUERIES=num_queries,
+            N_KEYS=num_keys,
+            scale=scale,
+            head_dim=head_dim,
+            Q_TILE_SIZE=Bq,
+            K_TILE_SIZE=Bk,
+            is_casual=is_casual,
+        )
+        return dQ, dK, dV, None
+
 
 
 if __name__ == "__main__":
