@@ -27,6 +27,10 @@ cd triton
 pip install -r python/requirements.txt # build-time dependencies
 pip install -e 
 ```
+And then re-install PyTorch nightly build to match with the latest Triton
+```
+pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
+``` 
 
 
 ### Run unit tests

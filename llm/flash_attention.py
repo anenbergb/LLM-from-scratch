@@ -121,9 +121,41 @@ class FlashAttentionPytorch(torch.autograd.Function):
             grad_output: Gradient of the output tensor.
         Returns:
             Gradients for Q, K, V, and dropout mask.
+
+        Q: Query tensor of shape (batch_size, num_queries, head_dim).
+        K: Key tensor of shape (batch_size, num_keys, head_dim).
+        V: Value tensor of shape (batch_size, num_keys, head_dim).
+        is_casual: If True, use causal attention mask.
+        logsumexp: of shape (batch_size, num_queries)
+        output: of shape (batch_size, num_queries, head_dim)
+
+        grad_output: of shape (batch_size, num_queries, head_dim)
+
         """
         # Implement the backward pass using FlashAttention
-        raise NotImplementedError("Backward pass not implemented yet.")
+        Q, K, V, logsumexp, output = ctx.saved_tensors
+        is_casual = ctx.is_casual
+        Bq = ctx.QUERY_TILE_SIZE
+        Bk = ctx.KEY_TILE_SIZE
+        batch_size, num_queries, head_dim = Q.shape
+
+        # D = rowsum(O * dO) = rowsum(P * dP) = diag(P*dP^T)
+        D = torch.sum(output * grad_output, dim=-1, keepdim=False)  # (bs, num_queries)
+
+        # scores Q @ K^T / sqrt(d_k)
+        S = einsum(Q, K, "... queries d, ... keys d -> ... queries keys") / math.sqrt(head_dim)
+        # don't need to compute softmax because we have logsumexp. P = softmax(S, dim=-1)
+        # logsumexp is size (bs, num_queries)
+        P = torch.exp(S - logsumexp[..., None])  # (bs, num_queries, num_keys)
+
+        dV = einsum(P, grad_output, "... queries keys, ... queries d -> ... keys d")
+        dP = einsum(grad_output, V, "... queries d, ... keys d -> ... queries keys")
+        # (bs, queries, keys) * ( (bs, queries, keys) - (bs, queries) )
+        dS = P * (dP - D[..., None])  # (bs, queries, keys)
+        dQ = einsum(dS, K, "... queries keys, ... keys d -> ... queries d") / math.sqrt(head_dim)
+        dK = einsum(dS, Q, "... queries keys, ... queries d -> ... keys d") / math.sqrt(head_dim)
+
+        return dQ, dK, dV, None
 
 
 @triton.jit
