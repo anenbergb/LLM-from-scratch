@@ -25,7 +25,7 @@ git clone https://github.com/triton-lang/triton.git
 cd triton
 
 pip install -r python/requirements.txt # build-time dependencies
-pip install -e 
+pip install -e .
 ```
 And then re-install PyTorch nightly build to match with the latest Triton
 ```

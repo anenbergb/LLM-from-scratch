@@ -312,14 +312,13 @@ def flash_fwd_kernel(
 
 
 @triton.jit
-def flash_bwd_kernel(
+def flash_bwd_dkv_kernel(
     Q_ptr,
     K_ptr,
     V_ptr,
     O_ptr,
     L_ptr,
     dO_ptr,
-    dQ_ptr,
     dK_ptr,
     dV_ptr,
     stride_qb,
@@ -360,9 +359,55 @@ def flash_bwd_kernel(
     # Program indices
     key_tile_index = tl.program_id(0)
     batch_index = tl.program_id(1)
+    k_offset = key_tile_index * K_TILE_SIZE
 
     # Offset each pointer with the corresponding batch index
     # multiplied with the batch stride for each tensor
+    # K of shape (bs, Nk, d) will be split into blocks of size (Bk, d)
+
+    # Key/value tile pointers (fixed for this kernel)
+    K_block_ptr = tl.make_block_ptr(
+        base=K_ptr + batch_index * stride_kb,
+        shape=(N_KEYS, head_dim),
+        strides=(stride_kk, stride_kd),
+        offsets=(k_offset, 0),
+        block_shape=(K_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+    dtype = K_block_ptr.type.element_ty
+
+    V_block_ptr = tl.make_block_ptr(
+        base=V_ptr + batch_index * stride_vb,
+        shape=(N_KEYS, head_dim),
+        strides=(stride_vk, stride_vd),
+        offsets=(k_offset, 0),
+        block_shape=(K_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+    dK_block_ptr = tl.make_block_ptr(
+        base=dK_ptr + batch_index * stride_kb,
+        shape=(N_KEYS, head_dim),
+        strides=(stride_kk, stride_kd),
+        offsets=(k_offset, 0),
+        block_shape=(K_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+    dV_block_ptr = tl.make_block_ptr(
+        base=dV_ptr + batch_index * stride_vb,
+        shape=(N_KEYS, head_dim),
+        strides=(stride_vk, stride_vd),
+        offsets=(k_offset, 0),
+        block_shape=(K_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+
+    # Load K/V tiles (static for this kernel)
+    K_tile = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    V_tile = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    dK_tile = tl.zeros((K_TILE_SIZE, head_dim), dtype=tl.float32)
+    dV_tile = tl.zeros((K_TILE_SIZE, head_dim), dtype=tl.float32)
+
+    # Query-tile-related pointers (advance in the loop)
     Q_block_ptr = tl.make_block_ptr(
         base=Q_ptr + batch_index * stride_qb,
         shape=(N_QUERIES, head_dim),
@@ -371,54 +416,6 @@ def flash_bwd_kernel(
         block_shape=(Q_TILE_SIZE, head_dim),
         order=(1, 0),
     )
-    dtype = Q_block_ptr.type.element_ty
-    dQ_block_ptr = tl.make_block_ptr(
-        base=dQ_ptr + batch_index * stride_qb,
-        shape=(N_QUERIES, head_dim),
-        strides=(stride_qq, stride_qd),
-        offsets=(0, 0),
-        block_shape=(Q_TILE_SIZE, head_dim),
-        order=(1, 0),
-    )
-
-    # K of shape (bs, Nk, d) will be split into blocks of size (Bk, d)
-    K_block_ptr = tl.make_block_ptr(
-        base=K_ptr + batch_index * stride_kb,
-        shape=(N_KEYS, head_dim),
-        strides=(stride_kk, stride_kd),
-        offsets=(key_tile_index * K_TILE_SIZE, 0),
-        block_shape=(K_TILE_SIZE, head_dim),
-        order=(1, 0),
-    )
-    dK_block_ptr = tl.make_block_ptr(
-        base=dK_ptr + batch_index * stride_kb,
-        shape=(N_KEYS, head_dim),
-        strides=(stride_kk, stride_kd),
-        offsets=(key_tile_index * K_TILE_SIZE, 0),
-        block_shape=(K_TILE_SIZE, head_dim),
-        order=(1, 0),
-    )
-
-    # V of shape (bs, Nk, d) will be split into blocks of size (Bk, d)
-    V_block_ptr = tl.make_block_ptr(
-        base=V_ptr + batch_index * stride_vb,
-        shape=(N_KEYS, head_dim),
-        strides=(stride_vk, stride_vd),
-        offsets=(key_tile_index * K_TILE_SIZE, 0),
-        block_shape=(K_TILE_SIZE, head_dim),
-        order=(1, 0),
-    )
-    dV_block_ptr = tl.make_block_ptr(
-        base=dV_ptr + batch_index * stride_vb,
-        shape=(N_KEYS, head_dim),
-        strides=(stride_vk, stride_vd),
-        offsets=(key_tile_index * K_TILE_SIZE, 0),
-        block_shape=(K_TILE_SIZE, head_dim),
-        order=(1, 0),
-    )
-
-    # offset within the output tensor of size (bs, Nq, d)
-    # will only write to a single output tile of size (Q_TILE_SIZE, d)
     O_block_ptr = tl.make_block_ptr(
         base=O_ptr + batch_index * stride_ob,
         shape=(N_QUERIES, head_dim),
@@ -427,7 +424,6 @@ def flash_bwd_kernel(
         block_shape=(Q_TILE_SIZE, head_dim),
         order=(1, 0),
     )
-    # offset within the grad_output tensor of size (bs, Nq, d)
     dO_block_ptr = tl.make_block_ptr(
         base=dO_ptr + batch_index * stride_ob,
         shape=(N_QUERIES, head_dim),
@@ -436,7 +432,6 @@ def flash_bwd_kernel(
         block_shape=(Q_TILE_SIZE, head_dim),
         order=(1, 0),
     )
-    # offset within the logsumexp tensor of size (bs, Nq)
     L_block_ptr = tl.make_block_ptr(
         base=L_ptr + batch_index * stride_lb,
         shape=(N_QUERIES,),
@@ -446,43 +441,156 @@ def flash_bwd_kernel(
         order=(0,),
     )
 
-    K_tile = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bk, d)
-    V_tile = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bk, d)
-    dK_tile = tl.zeros((K_TILE_SIZE, head_dim), dtype=tl.float32)  # (Bk, d)
-    dV_tile = tl.zeros((K_TILE_SIZE, head_dim), dtype=tl.float32)  # (Bk, d)
+    for query_tile_index in range(tl.cdiv(N_QUERIES, Q_TILE_SIZE)):
+        q_offset = query_tile_index * Q_TILE_SIZE
 
-    for tile_idx in range(tl.cdiv(N_QUERIES, Q_TILE_SIZE)):
-        q_offset = tile_idx * Q_TILE_SIZE
-        # inserts a 0.0 for any out-of-bounds elements to avoid reading past N_QUERIES
-        # tile size (Bq, d)
-        Q_tile = tl.load(Q_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero")
-        dQ_tile = tl.load(dQ_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero")
+        Q_tile = tl.load(Q_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
+            tl.float32
+        )
+        O_tile = tl.load(O_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
+            tl.float32
+        )
+        dO_tile = tl.load(dO_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
+            tl.float32
+        )
+        L_tile = tl.load(L_block_ptr.advance((q_offset,)), boundary_check=(0,), padding_option="zero").to(tl.float32)
 
-        O_tile = tl.load(O_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero")
-        dO_tile = tl.load(dO_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero")
+        # ensure that accumulation is done in float32
+        D_tile = tl.sum(O_tile * dO_tile, axis=1)
 
-        # L_tile size (Bq,)
-        L_tile = tl.load(L_block_ptr.advance((q_offset,)), boundary_check=(0,), padding_option="zero")
-
-        D = tl.sum(O_tile * dO_tile, dim=-1, keepdim=False).to(tl.float32)  # (Bq,)
-
-        # mask to prevent reading past N_KEY
-        # mask = ((tl.arange(0, Q_TILE_SIZE) + q_offset) < N_QUERIES)[None, :]  # shape: (1, Bq)
-
-        S = tl.dot(Q_tile, K_tile.T).to(tl.float32) * scale  # (Bq, Bk)
+        S = tl.dot(Q_tile, K_tile.T) * scale  # (Bq, Bk)
         # don't need to compute softmax because we have logsumexp. P = softmax(S, dim=-1)
-        P = torch.exp(S - L_tile[:, None])  # (Bq, Bk)
-        tl.dot(P.T, dO_tile.to(tl.float32), acc=dV_tile)  # (Bk,Bq)*(Bq,d)->(Bk, d)
-        dP = tl.dot(dO_tile.to(tl.float32), V_tile.T)  # (Bq, d)*(d, Bk)->(Bq, Bk)
-        dS = P * (dP - D[:, None]) * scale  # (Bq, Bk)
+        P = tl.exp(S - L_tile[:, None])  # (Bq, Bk)
+        dV_tile += tl.dot(P.T, dO_tile)  # (Bk,Bq)*(Bq,d)->(Bk, d)
+        dP = tl.dot(dO_tile, V_tile.T)  # (Bq, d)*(d, Bk)->(Bq, Bk)
+        dS = P * (dP - D_tile[:, None]) * scale  # (Bq, Bk)
+        dK_tile += tl.dot(dS.T, Q_tile)  # (Bk, Bq)*(Bq, d)->(Bk, d)
 
-        tl.dot(dS, K_tile.to(tl.float32), acc=dQ_tile)  # (Bq, Bk)*(Bk, d)->(Bq, d)
-        tl.dot(dS.T, Q_tile.to(tl.float32), acc=dK_tile)  # (Bk, Bq)*(Bq, d)->(Bk, d)
+    tl.store(dK_block_ptr, dK_tile.to(dtype), boundary_check=(0, 1))
+    tl.store(dV_block_ptr, dV_tile.to(dtype), boundary_check=(0, 1))
 
-    dK_tile = dK_tile.to(dtype)
-    dV_tile = dV_tile.to(dtype)
-    tl.store(dK_block_ptr, dK_tile, boundary_check=(0, 1))
-    tl.store(dV_block_ptr, dV_tile, boundary_check=(0, 1))
+
+@triton.jit
+def flash_bwd_dq_kernel(
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    O_ptr,
+    L_ptr,
+    dO_ptr,
+    dQ_ptr,
+    stride_qb,
+    stride_qq,
+    stride_qd,
+    stride_kb,
+    stride_kk,
+    stride_kd,
+    stride_ob,
+    stride_oq,
+    stride_od,
+    stride_lb,
+    stride_lq,
+    N_QUERIES,
+    N_KEYS,
+    scale: tl.constexpr,
+    head_dim: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,
+    K_TILE_SIZE: tl.constexpr,
+    is_casual: tl.constexpr,
+):
+    """
+    Backward pass kernel for FlashAttention.
+    This kernel computes the gradients for Q tensor.
+    """
+    # Program indices
+    query_tile_index = tl.program_id(0)
+    batch_index = tl.program_id(1)
+    q_offset = query_tile_index * Q_TILE_SIZE
+    # Q, O, dO, L, dQ pointers
+    # Query-side tiles (fixed per kernel instance)
+    Q_block_ptr = tl.make_block_ptr(
+        base=Q_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, head_dim),
+        strides=(stride_qq, stride_qd),
+        offsets=(q_offset, 0),
+        block_shape=(Q_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+    dQ_block_ptr = tl.make_block_ptr(
+        base=dQ_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, head_dim),
+        strides=(stride_qq, stride_qd),
+        offsets=(q_offset, 0),
+        block_shape=(Q_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+    O_block_ptr = tl.make_block_ptr(
+        base=O_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, head_dim),
+        strides=(stride_oq, stride_od),
+        offsets=(q_offset, 0),
+        block_shape=(Q_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+    dO_block_ptr = tl.make_block_ptr(
+        base=dO_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, head_dim),
+        strides=(stride_oq, stride_od),
+        offsets=(q_offset, 0),
+        block_shape=(Q_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+    L_block_ptr = tl.make_block_ptr(
+        base=L_ptr + batch_index * stride_lb,
+        shape=(N_QUERIES,),
+        strides=(stride_lq,),
+        offsets=(q_offset,),
+        block_shape=(Q_TILE_SIZE,),
+        order=(0,),
+    )
+
+    # Load query-side tiles, cast to float32
+    Q_tile = tl.load(Q_block_ptr, boundary_check=(0, 1)).to(tl.float32)
+    O_tile = tl.load(O_block_ptr, boundary_check=(0, 1)).to(tl.float32)
+    dO_tile = tl.load(dO_block_ptr, boundary_check=(0, 1)).to(tl.float32)
+    L_tile = tl.load(L_block_ptr, boundary_check=(0,)).to(tl.float32)
+
+    D_tile = tl.sum(O_tile * dO_tile, axis=1)  # (Bq,)
+    dQ_tile = tl.zeros((Q_TILE_SIZE, head_dim), dtype=tl.float32)
+
+    # Key-side pointers
+    K_block_ptr = tl.make_block_ptr(
+        base=K_ptr + batch_index * stride_kb,
+        shape=(N_KEYS, head_dim),
+        strides=(stride_kk, stride_kd),
+        offsets=(0, 0),
+        block_shape=(K_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+    V_block_ptr = tl.make_block_ptr(
+        base=V_ptr + batch_index * stride_kb,
+        shape=(N_KEYS, head_dim),
+        strides=(stride_kk, stride_kd),
+        offsets=(0, 0),
+        block_shape=(K_TILE_SIZE, head_dim),
+        order=(1, 0),
+    )
+
+    for key_tile_index in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+        k_offset = key_tile_index * K_TILE_SIZE
+
+        K_tile = tl.load(K_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
+        V_tile = tl.load(V_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
+
+        S = tl.dot(Q_tile, K_tile.T) * scale
+        P = tl.exp(S - L_tile[:, None])  # softmax weights
+
+        dP = tl.dot(dO_tile, V_tile.T)
+        dS = P * (dP - D_tile[:, None]) * scale
+
+        dQ_tile += tl.dot(dS, K_tile)
+
+    tl.store(dQ_block_ptr, dQ_tile.to(Q_tile.dtype), boundary_check=(0, 1))
 
 
 class FlashAttention(torch.autograd.Function):
@@ -599,16 +707,15 @@ class FlashAttention(torch.autograd.Function):
         dK = torch.empty_like(K)
         dV = torch.empty_like(V)
 
-        flash_bwd_kernel[(Tk, batch_size)](
+        flash_bwd_dkv_kernel[(Tk, batch_size)](
             Q_ptr=Q,
             K_ptr=K,
             V_ptr=V,
             O_ptr=output,
             L_ptr=logsumexp,
             dO_ptr=grad_output,
-            dQ_ptr=dQ,
-            dK_ptr=dK,  # Placeholder for dK
-            dV_ptr=dV,  # Placeholder for dV
+            dK_ptr=dK,
+            dV_ptr=dV,
             stride_qb=Q.stride(0),
             stride_qq=Q.stride(1),
             stride_qd=Q.stride(2),
@@ -618,6 +725,33 @@ class FlashAttention(torch.autograd.Function):
             stride_vb=V.stride(0),
             stride_vk=V.stride(1),
             stride_vd=V.stride(2),
+            stride_ob=output.stride(0),
+            stride_oq=output.stride(1),
+            stride_od=output.stride(2),
+            stride_lb=logsumexp.stride(0),
+            stride_lq=logsumexp.stride(1),
+            N_QUERIES=num_queries,
+            N_KEYS=num_keys,
+            scale=scale,
+            head_dim=head_dim,
+            Q_TILE_SIZE=Bq,
+            K_TILE_SIZE=Bk,
+            is_casual=is_casual,
+        )
+        flash_bwd_dq_kernel[(Tk, batch_size)](
+            Q_ptr=Q,
+            K_ptr=K,
+            V_ptr=V,
+            O_ptr=output,
+            L_ptr=logsumexp,
+            dO_ptr=grad_output,
+            dQ_ptr=dQ,
+            stride_qb=Q.stride(0),
+            stride_qq=Q.stride(1),
+            stride_qd=Q.stride(2),
+            stride_kb=K.stride(0),
+            stride_kk=K.stride(1),
+            stride_kd=K.stride(2),
             stride_ob=output.stride(0),
             stride_oq=output.stride(1),
             stride_od=output.stride(2),
