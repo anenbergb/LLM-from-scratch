@@ -455,12 +455,21 @@ def flash_bwd_dkv_kernel(
         )
         L_tile = tl.load(L_block_ptr.advance((q_offset,)), boundary_check=(0,), padding_option="zero").to(tl.float32)
 
+        # mask to prevent reading past N_QUERIES
+        mask = ((tl.arange(0, Q_TILE_SIZE) + q_offset) < N_QUERIES)[:, None]  # shape: (Bq, 1)
+        if is_casual:
+            # causal mask should be of shape (Bq, Bk)
+            query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
+            key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
+            mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
+
         # ensure that accumulation is done in float32
         D_tile = tl.sum(O_tile * dO_tile, axis=1)
 
         S = tl.dot(Q_tile, K_tile.T) * scale  # (Bq, Bk)
         # don't need to compute softmax because we have logsumexp. P = softmax(S, dim=-1)
         P = tl.exp(S - L_tile[:, None])  # (Bq, Bk)
+        P = tl.where(mask, P, 0.0)
         dV_tile += tl.dot(P.T, dO_tile)  # (Bk,Bq)*(Bq,d)->(Bk, d)
         dP = tl.dot(dO_tile, V_tile.T)  # (Bq, d)*(d, Bk)->(Bq, Bk)
         dS = P * (dP - D_tile[:, None]) * scale  # (Bq, Bk)
@@ -582,8 +591,18 @@ def flash_bwd_dq_kernel(
         K_tile = tl.load(K_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
         V_tile = tl.load(V_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
 
+        # mask to prevent reading past N_KEY
+        mask = ((tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS)[None, :]  # shape: (1, Bk)
+
+        if is_casual:
+            # causal mask should be of shape (Bq, Bk)
+            query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
+            key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
+            mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
+
         S = tl.dot(Q_tile, K_tile.T) * scale
         P = tl.exp(S - L_tile[:, None])  # softmax weights
+        P = tl.where(mask, P, 0.0)  # apply mask
 
         dP = tl.dot(dO_tile, V_tile.T)
         dS = P * (dP - D_tile[:, None]) * scale
