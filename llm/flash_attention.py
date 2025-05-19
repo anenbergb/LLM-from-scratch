@@ -1,5 +1,5 @@
 import torch
-from einops import einsum, rearrange
+from einops import einsum
 import math
 
 import triton
@@ -304,11 +304,8 @@ def flash_fwd_kernel(
     O_tile = O_tile / l_tile[:, None]
     L_tile = m_tile + tl.log(l_tile)  # logsumexp
 
-    O_tile = O_tile.to(dtype)
-    L_tile = L_tile.to(dtype)
-
-    tl.store(O_block_ptr, O_tile, boundary_check=(0, 1))
-    tl.store(L_block_ptr, L_tile, boundary_check=(0,))
+    tl.store(O_block_ptr, O_tile.to(dtype), boundary_check=(0, 1))
+    tl.store(L_block_ptr, L_tile.to(dtype), boundary_check=(0,))
 
 
 @triton.jit
@@ -345,7 +342,7 @@ def flash_bwd_dkv_kernel(
 ):
     """
     Backward pass kernel for FlashAttention.
-    This kernel computes the gradients for Q, K, and V tensors.
+    This kernel computes the gradients for K, and V tensors.
 
     Q: Query tensor of shape (batch_size, num_queries, head_dim).
     K: Key tensor of shape (batch_size, num_keys, head_dim).
@@ -402,8 +399,8 @@ def flash_bwd_dkv_kernel(
     )
 
     # Load K/V tiles (static for this kernel)
-    K_tile = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
-    V_tile = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    K_tile = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+    V_tile = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
     dK_tile = tl.zeros((K_TILE_SIZE, head_dim), dtype=tl.float32)
     dV_tile = tl.zeros((K_TILE_SIZE, head_dim), dtype=tl.float32)
 
@@ -525,6 +522,7 @@ def flash_bwd_dq_kernel(
         block_shape=(Q_TILE_SIZE, head_dim),
         order=(1, 0),
     )
+    dtype = Q_block_ptr.type.element_ty
     dQ_block_ptr = tl.make_block_ptr(
         base=dQ_ptr + batch_index * stride_qb,
         shape=(N_QUERIES, head_dim),
@@ -609,7 +607,7 @@ def flash_bwd_dq_kernel(
 
         dQ_tile += tl.dot(dS, K_tile)
 
-    tl.store(dQ_block_ptr, dQ_tile.to(Q_tile.dtype), boundary_check=(0, 1))
+    tl.store(dQ_block_ptr, dQ_tile.to(dtype), boundary_check=(0, 1))
 
 
 class FlashAttention(torch.autograd.Function):
@@ -757,7 +755,7 @@ class FlashAttention(torch.autograd.Function):
             K_TILE_SIZE=Bk,
             is_casual=is_casual,
         )
-        flash_bwd_dq_kernel[(Tk, batch_size)](
+        flash_bwd_dq_kernel[(Tq, batch_size)](
             Q_ptr=Q,
             K_ptr=K,
             V_ptr=V,
