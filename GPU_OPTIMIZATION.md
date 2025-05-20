@@ -151,3 +151,13 @@ https://openai.com/index/triton/
 
 References:
 - https://stanford-cs336.github.io/spring2025-lectures/?trace=var/traces/lecture_06.json
+
+
+# Flash Attention Implementation
+
+I implemented the following optimizations to the baseline Flash Attention 2 algorithm
+- Added `@triton.autotune` to tune the tile sizes (Q_TILE_SIZE and K_TILE_SIZE) per kernel
+- Optimized the backward pass to perform two passes over the input, one for dQ and another for dK and dV to avoid atomics or synchronization between blocks.
+- Skip tiles that are fully masked (causal masking) to eliminate unnecessary computation 
+- Avoid per-element masking for tiles that are guarenteed to be fully valid -- e.g. those squarely beneath the lower diagonal
+- Only apply causal masking to the diagonal tiles

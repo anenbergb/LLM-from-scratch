@@ -297,8 +297,22 @@ def flash_fwd_kernel(
     # easier compiler to unroll and optimize the loop
     for tile_idx in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
         k_offset = tile_idx * K_TILE_SIZE
-        # If this tile is fully masked, skip
-        fully_masked = is_casual and k_offset >= q_offset + Q_TILE_SIZE
+
+        fully_masked = False
+        apply_mask = False
+        if is_casual:
+            # Case 1: Fully masked – skip
+            if k_offset >= q_offset + Q_TILE_SIZE:
+                fully_masked = True
+            # Case 2: Fully valid – no mask needed
+            # Just perform 1D bounds check is cheap
+            elif k_offset + K_TILE_SIZE <= q_offset:
+                apply_mask = False
+            # Case 3: Diagonal – apply per-element mask
+            # Need to perform the full 2D mask
+            else:
+                apply_mask = True
+
         if not fully_masked:
             # Adjust K and V block pointers for this tile
             K_block_ptr_k = K_block_ptr.advance((k_offset, 0))
@@ -308,18 +322,22 @@ def flash_fwd_kernel(
             K_tile = tl.load(K_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
             V_tile = tl.load(V_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
 
-            # mask to prevent reading past N_KEY
-            mask = ((tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS)[None, :]  # shape: (1, Bk)
-
-            if is_casual:
-                # causal mask should be of shape (Bq, Bk)
-                query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
-                key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
-                mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
-
             # Compute the attention scores, ensuring that invalid elements are masked
             # (Bq, D) @ (Bk, D)^T = (Bq, Bk)
-            scores = tl.where(mask, tl.dot(Q_tile, K_tile.T).to(tl.float32) * scale, float("-inf"))
+            scores = tl.dot(Q_tile, K_tile.T).to(tl.float32) * scale
+            key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
+            if is_casual and apply_mask:
+                query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
+                qk_mask = query_indices[:, None] >= key_indices[None, :]  # (Bq, Bk)
+
+                # mask to prevent reading past N_KEY
+                key_mask = key_indices < N_KEYS  # shape: (Bk,)
+                mask = qk_mask & key_mask[None, :]
+                scores = tl.where(mask, scores, float("-inf"))
+            else:
+                # mask to prevent reading past N_KEY
+                key_mask = key_indices < N_KEYS  # shape: (Bk,)
+                scores = tl.where(key_mask[None, :], scores, float("-inf"))
 
             row_max = tl.max(scores, axis=-1, keep_dims=False)  # (Bq,)
             new_max = tl.maximum(m_tile, row_max)  # elementwise max
@@ -493,6 +511,20 @@ def flash_bwd_dkv_kernel(
     for query_tile_index in range(tl.cdiv(N_QUERIES, Q_TILE_SIZE)):
         q_offset = query_tile_index * Q_TILE_SIZE
         query_fully_masked = is_casual and (q_offset + Q_TILE_SIZE - 1 < k_offset)
+
+        fully_masked = False
+        apply_mask = False
+        if is_casual:
+            # Case 1: Fully masked – skip
+            if q_offset + Q_TILE_SIZE - 1 < k_offset:
+                fully_masked = True
+            # Case 2: Fully valid – no mask needed
+            elif q_offset >= k_offset + K_TILE_SIZE:
+                apply_mask = False  # full valid
+            # Case 3: Diagonal – apply per-element mask
+            else:
+                apply_mask = True  # diagonal
+
         if not query_fully_masked:
             Q_tile = tl.load(Q_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
                 tl.float32
@@ -506,22 +538,24 @@ def flash_bwd_dkv_kernel(
             L_tile = tl.load(L_block_ptr.advance((q_offset,)), boundary_check=(0,), padding_option="zero").to(
                 tl.float32
             )
-
-            # mask to prevent reading past N_QUERIES
-            mask = ((tl.arange(0, Q_TILE_SIZE) + q_offset) < N_QUERIES)[:, None]  # shape: (Bq, 1)
-            if is_casual:
-                # causal mask should be of shape (Bq, Bk)
-                query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
-                key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
-                mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
-
             # ensure that accumulation is done in float32
             D_tile = tl.sum(O_tile * dO_tile, axis=1)
 
             S = tl.dot(Q_tile, K_tile.T) * scale  # (Bq, Bk)
             # don't need to compute softmax because we have logsumexp. P = softmax(S, dim=-1)
             P = tl.exp(S - L_tile[:, None])  # (Bq, Bk)
-            P = tl.where(mask, P, 0.0)
+
+            query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
+            if is_casual and apply_mask:
+                key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
+                qk_mask = query_indices[:, None] >= key_indices[None, :]  # (Bq, Bk)
+                query_mask = query_indices < N_QUERIES
+                qk_mask &= query_mask[:, None]
+                P = tl.where(qk_mask, P, 0.0)
+            else:
+                query_mask = query_indices < N_QUERIES
+                P = tl.where(query_mask[:, None], P, 0.0)
+
             dV_tile += tl.dot(P.T, dO_tile)  # (Bk,Bq)*(Bq,d)->(Bk, d)
             dP = tl.dot(dO_tile, V_tile.T)  # (Bq, d)*(d, Bk)->(Bq, Bk)
             dS = P * (dP - D_tile[:, None]) * scale  # (Bq, Bk)
@@ -652,23 +686,36 @@ def flash_bwd_dq_kernel(
 
     for key_tile_index in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
         k_offset = key_tile_index * K_TILE_SIZE
-        fully_masked = is_casual and (k_offset > q_offset + Q_TILE_SIZE - 1)
+
+        fully_masked = False
+        apply_mask = False
+        if is_casual:
+            # Tile is fully masked
+            if k_offset > q_offset + Q_TILE_SIZE - 1:
+                fully_masked = True
+            elif k_offset + K_TILE_SIZE - 1 <= q_offset:
+                apply_mask = False  # full valid
+            else:
+                apply_mask = True  # diagonal
+
         if not fully_masked:
             K_tile = tl.load(K_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
             V_tile = tl.load(V_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
-
-            # mask to prevent reading past N_KEY
-            mask = ((tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS)[None, :]  # shape: (1, Bk)
-
-            if is_casual:
-                # causal mask should be of shape (Bq, Bk)
-                query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
-                key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
-                mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
-
             S = tl.dot(Q_tile, K_tile.T) * scale
             P = tl.exp(S - L_tile[:, None])  # softmax weights
-            P = tl.where(mask, P, 0.0)  # apply mask
+
+            key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
+            if is_casual and apply_mask:
+                # causal mask should be of shape (Bq, Bk)
+                query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
+                qk_mask = query_indices[:, None] >= key_indices[None, :]  # (Bq, Bk)
+                # mask to prevent reading past N_KEY
+                key_mask = key_indices < N_KEYS  # shape: (Bk,)
+                qk_mask &= key_mask[None, :]
+                P = tl.where(qk_mask, P, 0.0)
+            else:
+                key_mask = key_indices < N_KEYS  # shape: (Bk,)
+                P = tl.where(key_mask[None, :], P, 0.0)
 
             dP = tl.dot(dO_tile, V_tile.T)
             dS = P * (dP - D_tile[:, None]) * scale
