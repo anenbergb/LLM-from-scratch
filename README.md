@@ -174,7 +174,7 @@ Conclusion: apply weight tying, but use the fully connected layer weight initial
 
 ### Model Size Experiment
 
-I trained four different model sizes for **100k iterations** to study the impact of scale on performance. The *tiny* and *small* models used a maximum learning rate of `1e-3`, while the *medium* and *large* models required lower learning rates (`3e-4` and `2e-4` respectively) to prevent training divergence.
+I trained four different model sizes for **100k iterations** to study the impact of scale on performance. The *tiny* and *small* models used a maximum learning rate of `1e-3`, while the *medium* and *large* models required lower learning rates (`3e-4` and `2e-4` respectively) to prevent training divergence. All models were trained with a context length of 256 tokens.
 
 Due to GPU memory constraints (single RTX 5090 with 32 GB vRAM), the *medium* and *large* models were also trained with smaller batch sizes.
 
@@ -202,3 +202,37 @@ Here’s a rephrased version in Markdown:
 ### 500k Iteration Experiment
 
 I trained the medium-sized model for **500k iterations** using a maximum learning rate of `5e-4`, resulting in a final validation loss of **3.202**. This is an improvement over the **3.421** validation loss achieved with **100k iterations** at a lower learning rate of `3e-4`.
+
+## Generating Text
+Given the trained LLM, we can generate text using the [generateLLM](llm/generation.py) function which accepts arguments such as
+  - `max_new_tokens`: Maximum number of tokens to generate.
+  - `temperature`: Controls randomness. Set to `0` for greedy decoding, `>1` for more diverse output.
+  - `top_k`: Limits sampling to the top-k most probable tokens.
+  - `top_p`: Enables nucleus sampling by keeping tokens within cumulative probability `top_p`.
+  - `eos_token_id`: Optional token ID to stop generation early.
+  - `seed`: Optional random seed for reproducibility.
+
+The method handles input padding or truncation based on the model’s context length and iteratively generates one token at a time using the selected sampling strategy.
+
+Below is a sample generation from the medium-sized model trained for 500k iterations on the OpenWebText dataset. While the output is somewhat coherent, it lacks the fluency and consistency desired. This is likely due to several factors: despite the extended training (500k iterations with a batch size of 32 and context length of 256), the model only completed a fraction of a full epoch over the dataset. Additionally, the model's capacity may have been insufficient for effectively modeling a dataset of this scale.
+
+```
+PROMPT:
+Machine learning is a subset of artificial intelligence that focuses on building systems that learn from data. One of the key algorithms in supervised learning is
+GENERATED:
+Machine learning is a subset of artificial intelligence that focuses on building systems that learn from data. One of the key algorithms in supervised learning is the "prediction function", in order to get the best from the machine learning model for a given state, which is what we've got in the case of this article. For instance, the algorithm would be able to learn that if it is the case that there are no real-world data points that it's not the case, then it will be a good idea to run it through a few different tests, one of which will be a bit more complicated.
+
+I am a big fan of the new algorithm. But the way it works has a lot to do with how you define and test it. The first step is to determine what the output of your algorithm is, the number of variables, the time it takes, etc. The best thing about this is that you can have your models run in realtime, which means it's much easier to test them than it is to test them in realtime.
+```
+
+For comparison, here is a sample generation from a tiny-sized model trained for just 50k iterations on the much smaller TinyStories dataset. Despite its significantly smaller size and shorter training time, the generated text appears noticeably more coherent, with a story that makes clearer sense.
+
+```
+PROMPT:
+Once upon a time, there was a pretty girl named Lily. She loved to eat
+GENERATED:
+Once upon a time, there was a pretty girl named Lily. She loved to eat pizza while she played games and shared her toys with her friends. One day, she decided to make a special menu for her friends.
+Lily called her friends Tom and Lily and said, "Come see the menu! We have pizza!" Tom and Lily came and saw the menu. They all wanted to eat cheese for their lunch. Lily's mom gave them some pizza, and they all sat down to eat.
+After they were done eating, Lily said, "I will record the yummy food on my plate. I am sure my friends will love it." She held her plate and started to record. They all smiled and said, "Thank you for the yummy food!" Lily was happy to share her yummy food with her friends.
+<|endoftext|>
+```
