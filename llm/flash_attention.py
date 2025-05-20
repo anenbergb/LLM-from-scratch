@@ -158,6 +158,15 @@ class FlashAttentionPytorch(torch.autograd.Function):
         return dQ, dK, dV, None
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"Q_TILE_SIZE": 32, "K_TILE_SIZE": 32}, num_warps=4),
+        triton.Config({"Q_TILE_SIZE": 64, "K_TILE_SIZE": 64}, num_warps=4),
+        triton.Config({"Q_TILE_SIZE": 128, "K_TILE_SIZE": 64}, num_warps=8),
+        triton.Config({"Q_TILE_SIZE": 128, "K_TILE_SIZE": 128}, num_warps=8),
+    ],
+    key=["N_QUERIES", "N_KEYS", "head_dim"],
+)
 @triton.jit
 def flash_fwd_kernel(
     Q_ptr,
@@ -182,23 +191,47 @@ def flash_fwd_kernel(
     N_QUERIES,
     N_KEYS,
     scale: tl.constexpr,
-    D: tl.constexpr,
+    head_dim: tl.constexpr,
+    is_casual: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
-    is_casual: tl.constexpr,
 ):
+    """
+    num_warps determines how many independent threads the kernel uses to execute a tile.
+    warp = 32 threads
+        num_warps = 4 -> 128 threads
+        num_warps = 8 -> 256 threads
+    As tile size increases from 32x32 to 128x128
+    - There's more work per tile: more rows x more dot products x more memory
+    - You need more threads to parallelize that work effectively
+    - Larger tiles also increase shared memory and register pressure -> distribute across more threads
+    Rule of thumb:
+        Tile_size (16-32) -> num_warps (2-4)
+        Tile_size (64) -> num_warps (4)
+        Tile_size (128) -> num_warps (8)
+
+    head_dim is included in the autotune because head_dim affects
+    - dot product sizes
+    - memory stride
+    - num loads/stores
+    """
+
     # Program indices
     query_tile_index = tl.program_id(0)
     batch_index = tl.program_id(1)
+
+    q_offset = query_tile_index * Q_TILE_SIZE
+    if q_offset >= N_QUERIES:
+        return
 
     # Offset each pointer with the corresponding batch index
     # multiplied with the batch stride for each tensor
     Q_block_ptr = tl.make_block_ptr(
         base=Q_ptr + batch_index * stride_qb,
-        shape=(N_QUERIES, D),
+        shape=(N_QUERIES, head_dim),
         strides=(stride_qq, stride_qd),
-        offsets=(query_tile_index * Q_TILE_SIZE, 0),
-        block_shape=(Q_TILE_SIZE, D),
+        offsets=(q_offset, 0),
+        block_shape=(Q_TILE_SIZE, head_dim),
         order=(1, 0),
     )
 
@@ -219,20 +252,20 @@ def flash_fwd_kernel(
     # K of shape (bs, Nk, D) will be split into blocks of size (Bk, D)
     K_block_ptr = tl.make_block_ptr(
         base=K_ptr + batch_index * stride_kb,
-        shape=(N_KEYS, D),
+        shape=(N_KEYS, head_dim),
         strides=(stride_kk, stride_kd),
         offsets=(0, 0),
-        block_shape=(K_TILE_SIZE, D),
+        block_shape=(K_TILE_SIZE, head_dim),
         order=(1, 0),
     )
 
     # V of shape (bs, Nk, D) will be split into blocks of size (Bk, D)
     V_block_ptr = tl.make_block_ptr(
         base=V_ptr + batch_index * stride_vb,
-        shape=(N_KEYS, D),
+        shape=(N_KEYS, head_dim),
         strides=(stride_vk, stride_vd),
         offsets=(0, 0),
-        block_shape=(K_TILE_SIZE, D),
+        block_shape=(K_TILE_SIZE, head_dim),
         order=(1, 0),
     )
 
@@ -240,10 +273,10 @@ def flash_fwd_kernel(
     # will only write to a single output tile of size (Q_TILE_SIZE, D)
     O_block_ptr = tl.make_block_ptr(
         base=O_ptr + batch_index * stride_ob,
-        shape=(N_QUERIES, D),
+        shape=(N_QUERIES, head_dim),
         strides=(stride_oq, stride_od),
-        offsets=(query_tile_index * Q_TILE_SIZE, 0),
-        block_shape=(Q_TILE_SIZE, D),
+        offsets=(q_offset, 0),
+        block_shape=(Q_TILE_SIZE, head_dim),
         order=(1, 0),
     )
     # offset within the logsumexp tensor of size (bs, Nq)
@@ -251,13 +284,13 @@ def flash_fwd_kernel(
         base=L_ptr + batch_index * stride_lb,
         shape=(N_QUERIES,),
         strides=(stride_lq,),
-        offsets=(query_tile_index * Q_TILE_SIZE,),
+        offsets=(q_offset,),
         block_shape=(Q_TILE_SIZE,),
         order=(0,),
     )
 
     Q_tile = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")  # (Bq, D)
-    O_tile = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)  # (Bq, D)
+    O_tile = tl.zeros((Q_TILE_SIZE, head_dim), dtype=tl.float32)  # (Bq, D)
     l_tile = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)  # (Bq,) log(sum(exp(Scores_ij))
     m_tile = tl.full((Q_TILE_SIZE,), float("-inf"), dtype=tl.float32)  # (Bq,)
 
@@ -277,7 +310,7 @@ def flash_fwd_kernel(
 
         if is_casual:
             # causal mask should be of shape (Bq, Bk)
-            query_indices = tl.arange(0, Q_TILE_SIZE) + query_tile_index * Q_TILE_SIZE
+            query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
             key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
             mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
 
@@ -308,6 +341,15 @@ def flash_fwd_kernel(
     tl.store(L_block_ptr, L_tile.to(dtype), boundary_check=(0,))
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"Q_TILE_SIZE": 32, "K_TILE_SIZE": 32}, num_warps=4),
+        triton.Config({"Q_TILE_SIZE": 64, "K_TILE_SIZE": 64}, num_warps=4),
+        triton.Config({"Q_TILE_SIZE": 128, "K_TILE_SIZE": 64}, num_warps=8),
+        triton.Config({"Q_TILE_SIZE": 128, "K_TILE_SIZE": 128}, num_warps=8),
+    ],
+    key=["N_QUERIES", "N_KEYS", "head_dim"],
+)
 @triton.jit
 def flash_bwd_dkv_kernel(
     Q_ptr,
@@ -336,9 +378,9 @@ def flash_bwd_dkv_kernel(
     N_KEYS,
     scale: tl.constexpr,
     head_dim: tl.constexpr,
+    is_casual: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
-    is_casual: tl.constexpr,
 ):
     """
     Backward pass kernel for FlashAttention.
@@ -357,6 +399,9 @@ def flash_bwd_dkv_kernel(
     key_tile_index = tl.program_id(0)
     batch_index = tl.program_id(1)
     k_offset = key_tile_index * K_TILE_SIZE
+
+    if k_offset >= N_KEYS:
+        return
 
     # Offset each pointer with the corresponding batch index
     # multiplied with the batch stride for each tensor
@@ -476,6 +521,15 @@ def flash_bwd_dkv_kernel(
     tl.store(dV_block_ptr, dV_tile.to(dtype), boundary_check=(0, 1))
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"Q_TILE_SIZE": 32, "K_TILE_SIZE": 32}, num_warps=4),
+        triton.Config({"Q_TILE_SIZE": 64, "K_TILE_SIZE": 64}, num_warps=4),
+        triton.Config({"Q_TILE_SIZE": 128, "K_TILE_SIZE": 64}, num_warps=8),
+        triton.Config({"Q_TILE_SIZE": 128, "K_TILE_SIZE": 128}, num_warps=8),
+    ],
+    key=["N_QUERIES", "N_KEYS", "head_dim"],
+)
 @triton.jit
 def flash_bwd_dq_kernel(
     Q_ptr,
@@ -500,9 +554,9 @@ def flash_bwd_dq_kernel(
     N_KEYS,
     scale: tl.constexpr,
     head_dim: tl.constexpr,
+    is_casual: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
-    is_casual: tl.constexpr,
 ):
     """
     Backward pass kernel for FlashAttention.
@@ -512,6 +566,9 @@ def flash_bwd_dq_kernel(
     query_tile_index = tl.program_id(0)
     batch_index = tl.program_id(1)
     q_offset = query_tile_index * Q_TILE_SIZE
+    if q_offset >= N_QUERIES:
+        return
+
     # Q, O, dO, L, dQ pointers
     # Query-side tiles (fixed per kernel instance)
     Q_block_ptr = tl.make_block_ptr(
@@ -627,34 +684,33 @@ class FlashAttention(torch.autograd.Function):
         - save L, Q, K, V, O for the backward pass
         - returns O
         """
-
-        assert Q.is_contiguous(), "Our pointer arithmetic will assume contiguous Q"
-        assert K.is_contiguous(), "Our pointer arithmetic will assume contiguous K"
-        assert V.is_contiguous(), "Our pointer arithmetic will assume contiguous V"
+        Q = Q.contiguous()
+        K = K.contiguous()
+        V = V.contiguous()
         assert Q.dtype == K.dtype == V.dtype, "Q, K, and V must have the same dtype"
         assert Q.is_cuda, "FlashAttention requires CUDA"
         assert Q.device == K.device == V.device, "Q, K, and V must be on the same device"
-        D = Q.shape[-1]
+        head_dim = Q.shape[-1]
         num_queries = Q.shape[-2]  # Nq
         num_keys = K.shape[-2]  # Nk
         batch_size = Q.shape[0]
-        assert Q.shape[-1] == D == D, "Q, K, and V must have the same last dimension"
+        assert Q.shape[-1] == head_dim == head_dim, "Q, K, and V must have the same last dimension"
         assert V.shape[-2] == num_keys, "V must have the same number of keys as K"
         assert K.shape[0] == V.shape[0] == batch_size, "Q, K, and V must have the same batch size"
 
-        Bq = ctx.QUERY_TILE_SIZE = 16  # Bq, Each thread processes 16 batch elements at a time
-        Bk = ctx.KEY_TILE_SIZE = 16  # Bk
         ctx.is_casual = is_casual
 
+        # Bq = QUERY_TILE_SIZE, Bk = KEY_TILE_SIZE
+        # Bq and Bk will be set by triton.autotune, so we have to just set a dummy value for now
         # split Q into Tq = ceil(Nq / Bq) tiles of size Bq x D
         # split K into Tk = ceil(Nk / Bk) tiles of size Bk x D
         # split V into Tk = ceil(Nk / Bk) tiles of size Bk x D
-        Tq = triton.cdiv(num_queries, Bq)
+        Tq = triton.cdiv(num_queries, 1)
 
-        output = torch.empty((batch_size, num_queries, D), device=Q.device, dtype=Q.dtype)
+        output = torch.empty((batch_size, num_queries, head_dim), device=Q.device, dtype=Q.dtype)
         logsumexp = torch.empty((batch_size, num_queries), device=Q.device, dtype=Q.dtype)
 
-        scale = 1.0 / math.sqrt(D)
+        scale = 1.0 / math.sqrt(head_dim)
         # Triton program instance will only load elements from a single batch index
         # and only read/write to a single query tile of Q, O, L
         flash_fwd_kernel[(Tq, batch_size)](
@@ -680,9 +736,7 @@ class FlashAttention(torch.autograd.Function):
             N_QUERIES=num_queries,
             N_KEYS=num_keys,
             scale=scale,
-            D=D,
-            Q_TILE_SIZE=Bq,
-            K_TILE_SIZE=Bk,
+            head_dim=head_dim,
             is_casual=is_casual,
         )
         ctx.save_for_backward(Q, K, V, logsumexp, output)
@@ -709,14 +763,25 @@ class FlashAttention(torch.autograd.Function):
 
         """
         Q, K, V, logsumexp, output = ctx.saved_tensors
+        Q = Q.contiguous()
+        K = K.contiguous()
+        V = V.contiguous()
+        logsumexp = logsumexp.contiguous()
+        output = output.contiguous()
+        grad_output = grad_output.contiguous()
+
+        assert Q.dtype == logsumexp.dtype == output.dtype == grad_output.dtype, "All tensors must have the same dtype"
+        assert Q.is_cuda, "FlashAttention requires CUDA"
+        assert Q.device == logsumexp.device == output.device == grad_output.device, (
+            "All tensors must be on the same device"
+        )
+
         is_casual = ctx.is_casual
-        Bq = ctx.QUERY_TILE_SIZE
-        Bk = ctx.KEY_TILE_SIZE
         batch_size, num_queries, head_dim = Q.shape
         num_keys = K.shape[-2]
 
-        Tq = triton.cdiv(num_queries, Bq)  # number of query tiles
-        Tk = triton.cdiv(num_keys, Bk)  # number of key tiles
+        Tq = triton.cdiv(num_queries, 1)  # number of query tiles
+        Tk = triton.cdiv(num_keys, 1)  # number of key tiles
 
         scale = 1.0 / math.sqrt(head_dim)
 
@@ -751,8 +816,6 @@ class FlashAttention(torch.autograd.Function):
             N_KEYS=num_keys,
             scale=scale,
             head_dim=head_dim,
-            Q_TILE_SIZE=Bq,
-            K_TILE_SIZE=Bk,
             is_casual=is_casual,
         )
         flash_bwd_dq_kernel[(Tq, batch_size)](
@@ -778,8 +841,6 @@ class FlashAttention(torch.autograd.Function):
             N_KEYS=num_keys,
             scale=scale,
             head_dim=head_dim,
-            Q_TILE_SIZE=Bq,
-            K_TILE_SIZE=Bk,
             is_casual=is_casual,
         )
         return dQ, dK, dV, None
