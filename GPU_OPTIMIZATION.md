@@ -155,6 +155,11 @@ References:
 
 # High-Performance Flash Attention Implementation
 
+<img src="https://github.com/user-attachments/assets/8f9fcc2a-d44a-4f87-96f5-8fc129bb37dc" width="500"/>
+
+<img src="https://github.com/user-attachments/assets/5819dcba-858b-4fc3-b59c-62ae0266db68" width="500"/>
+
+
 I implemented the following optimizations on top of the baseline Flash Attention v2 algorithm
 - Added `@triton.autotune` to tune the tile sizes (Q_TILE_SIZE and K_TILE_SIZE) per kernel
 - Optimized the backward pass to perform two passes over the input, one for dQ and another for dK and dV to avoid atomics or synchronization between blocks.
