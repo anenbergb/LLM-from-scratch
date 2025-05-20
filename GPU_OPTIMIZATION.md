@@ -161,3 +161,100 @@ I implemented the following optimizations to the baseline Flash Attention 2 algo
 - Skip tiles that are fully masked (causal masking) to eliminate unnecessary computation 
 - Avoid per-element masking for tiles that are guarenteed to be fully valid -- e.g. those squarely beneath the lower diagonal
 - Only apply causal masking to the diagonal tiles
+
+TMA (Tensor Memory Accelerator) is a hardware feature to accelerate blockwise asynchronous memory transfers, particularly in support of Tensor Cores and high-efficiency shared memory usage.
+- https://research.colfax-intl.com/tutorial-hopper-tma
+- https://triton-lang.org/main/getting-started/tutorials/09-persistent-matmul.html
+
+TMA allows:
+- Asynchronous, hardware-accelerated copy of rectangular (tensor-shaped) tiles from global memory into shared memory.
+- It replaces the need for custom load loops that read global memory tile-by-tile.
+- It minimizes address calculation overhead, coalescing inefficiencies, and memory bottlenecks.
+
+In Triton terms, this could replace a tl.load(...) pattern with a single instruction that copies an entire tile efficiently to shared memory, suitable for use in tl.dot(...) or matmul kernels.
+
+The output from running `python llm/tools/09-persistent-matmul.py --prec fp8 --K_range 128 1024 --K_step 128`
+
+```
+215.919 257794.850 ROOT
+├─ 419.013 3280.062 cublas [M=8192, N=8192, K=1024]                                                                                                                                                 
+│  └─ nan 3280.062 sm89_xmma_gemm_e4m3e4m3_e4m3f32_f32_tn_n_tilesize128x128x64_stage3_warpsize2x2x1_tensor16x8x32_bias_f16_execute_kernel__5x_cublas
+├─ 247.661 693.684 cublas [M=8192, N=8192, K=128]                                                                                                                                                   
+│  └─ nan 693.684 sm89_xmma_gemm_e4m3e4m3_e4m3f32_f32_tn_n_tilesize128x128x64_stage3_warpsize2x2x1_tensor16x8x32_bias_f16_execute_kernel__5x_cublas
+├─ 341.896 1004.976 cublas [M=8192, N=8192, K=256]                                                                                                                                                  
+│  └─ nan 1004.976 sm89_xmma_gemm_e4m3e4m3_e4m3f32_f32_tn_n_tilesize128x128x64_stage3_warpsize2x2x1_tensor16x8x32_bias_f16_execute_kernel__5x_cublas
+├─ 332.291 1551.037 cublas [M=8192, N=8192, K=384]                                                                                                                                                  
+│  └─ nan 1551.037 sm89_xmma_gemm_e4m3e4m3_e4m3f32_f32_tn_n_tilesize64x128x64_stage4_warpsize2x2x1_tensor16x8x32_bias_f16_execute_kernel__5x_cublas
+├─ 351.456 1955.280 cublas [M=8192, N=8192, K=512]                                                                                                                                                  
+│  └─ nan 1955.280 sm89_xmma_gemm_e4m3e4m3_e4m3f32_f32_tn_n_tilesize64x128x64_stage4_warpsize2x2x1_tensor16x8x32_bias_f16_execute_kernel__5x_cublas
+├─ 361.021 2379.347 cublas [M=8192, N=8192, K=640]                                                                                                                                                  
+│  └─ nan 2379.347 sm89_xmma_gemm_e4m3e4m3_e4m3f32_f32_tn_n_tilesize64x128x64_stage4_warpsize2x2x1_tensor16x8x32_bias_f16_execute_kernel__5x_cublas
+├─ 369.327 2791.001 cublas [M=8192, N=8192, K=768]                                                                                                                                                  
+│  └─ nan 2791.001 sm89_xmma_gemm_e4m3e4m3_e4m3f32_f32_tn_n_tilesize64x128x64_stage4_warpsize2x2x1_tensor16x8x32_bias_f16_execute_kernel__5x_cublas
+├─ 376.035 3198.084 cublas [M=8192, N=8192, K=896]                                                                                                                                                  
+│  └─ nan 3198.084 sm89_xmma_gemm_e4m3e4m3_e4m3f32_f32_tn_n_tilesize64x128x64_stage4_warpsize2x2x1_tensor16x8x32_bias_f16_execute_kernel__5x_cublas
+├─ 232.209 5918.773 matmul_kernel [M=8192, N=8192, K=1024]                                                                                                                                          
+├─ 203.670 843.516 matmul_kernel [M=8192, N=8192, K=128]                                                                                                                                            
+├─ 220.541 1557.978 matmul_kernel [M=8192, N=8192, K=256]                                                                                                                                           
+├─ 224.497 2295.784 matmul_kernel [M=8192, N=8192, K=384]                                                                                                                                           
+├─ 228.916 3001.952 matmul_kernel [M=8192, N=8192, K=512]                                                                                                                                           
+├─ 229.983 3735.036 matmul_kernel [M=8192, N=8192, K=640]                                                                                                                                           
+├─ 230.118 4479.399 matmul_kernel [M=8192, N=8192, K=768]                                                                                                                                           
+├─ 231.251 5200.370 matmul_kernel [M=8192, N=8192, K=896]                                                                                                                                           
+├─ 207.247 6631.662 matmul_kernel_descriptor_persistent [M=8192, N=8192, K=1024]                                                                                                                    
+├─ 174.468 984.703 matmul_kernel_descriptor_persistent [M=8192, N=8192, K=128]                                                                                                                      
+├─ 183.898 1868.415 matmul_kernel_descriptor_persistent [M=8192, N=8192, K=256]                                                                                                                     
+├─ 198.820 2592.279 matmul_kernel_descriptor_persistent [M=8192, N=8192, K=384]                                                                                                                     
+├─ 202.012 3401.759 matmul_kernel_descriptor_persistent [M=8192, N=8192, K=512]                                                                                                                     
+├─ 203.839 4214.087 matmul_kernel_descriptor_persistent [M=8192, N=8192, K=640]                                                                                                                     
+├─ 205.520 5015.540 matmul_kernel_descriptor_persistent [M=8192, N=8192, K=768]                                                                                                                     
+├─ 206.514 5823.296 matmul_kernel_descriptor_persistent [M=8192, N=8192, K=896]                                                                                                                     
+├─ 202.212 6796.786 matmul_kernel_descriptor_persistent_ws [M=8192, N=8192, K=1024]                                                                                                                 
+├─ 166.063 1034.540 matmul_kernel_descriptor_persistent_ws [M=8192, N=8192, K=128]                                                                                                                  
+├─ 186.589 1841.470 matmul_kernel_descriptor_persistent_ws [M=8192, N=8192, K=256]                                                                                                                  
+├─ 193.280 2666.573 matmul_kernel_descriptor_persistent_ws [M=8192, N=8192, K=384]                                                                                                                  
+├─ 196.729 3493.098 matmul_kernel_descriptor_persistent_ws [M=8192, N=8192, K=512]                                                                                                                  
+├─ 198.757 4321.833 matmul_kernel_descriptor_persistent_ws [M=8192, N=8192, K=640]                                                                                                                  
+├─ 200.328 5145.522 matmul_kernel_descriptor_persistent_ws [M=8192, N=8192, K=768]                                                                                                                  
+├─ 200.644 5993.647 matmul_kernel_descriptor_persistent_ws [M=8192, N=8192, K=896] 
+├─ 218.517 6289.614 matmul_kernel_persistent [M=8192, N=8192, K=1024]                                                                                                                               
+├─ 179.225 958.564 matmul_kernel_persistent [M=8192, N=8192, K=128]                                                                                                                                 
+├─ 202.975 1692.807 matmul_kernel_persistent [M=8192, N=8192, K=256]                                                                                                                                
+├─ 208.800 2468.377 matmul_kernel_persistent [M=8192, N=8192, K=384]                                                                                                                                
+├─ 213.013 3226.074 matmul_kernel_persistent [M=8192, N=8192, K=512]                              
+├─ 214.985 3995.590 matmul_kernel_persistent [M=8192, N=8192, K=640]                              
+├─ 216.442 4762.443 matmul_kernel_persistent [M=8192, N=8192, K=768]                              
+├─ 217.662 5525.030 matmul_kernel_persistent [M=8192, N=8192, K=896]                              
+├─ 227.562 6039.631 matmul_kernel_tma [M=8192, N=8192, K=1024]                                    
+├─ 199.443 861.392 matmul_kernel_tma [M=8192, N=8192, K=128]                                      
+├─ 203.310 1690.016 matmul_kernel_tma [M=8192, N=8192, K=256]                                     
+├─ 221.793 2323.768 matmul_kernel_tma [M=8192, N=8192, K=384]                                     
+├─ 222.727 3085.370 matmul_kernel_tma [M=8192, N=8192, K=512]                                     
+├─ 225.611 3807.410 matmul_kernel_tma [M=8192, N=8192, K=640]                                     
+├─ 225.973 4561.573 matmul_kernel_tma [M=8192, N=8192, K=768]                                     
+├─ 227.212 5292.818 matmul_kernel_tma [M=8192, N=8192, K=896]                                     
+├─ 207.528 6622.674 matmul_kernel_tma_persistent [M=8192, N=8192, K=1024]                         
+├─ 167.850 1023.526 matmul_kernel_tma_persistent [M=8192, N=8192, K=128]                          
+├─ 190.237 1806.156 matmul_kernel_tma_persistent [M=8192, N=8192, K=256]                          
+├─ 199.451 2584.071 matmul_kernel_tma_persistent [M=8192, N=8192, K=384]                          
+├─ 202.596 3391.954 matmul_kernel_tma_persistent [M=8192, N=8192, K=512]                          
+├─ 204.326 4204.024 matmul_kernel_tma_persistent [M=8192, N=8192, K=640]                          
+├─ 205.789 5008.986 matmul_kernel_tma_persistent [M=8192, N=8192, K=768]                          
+├─ 206.662 5819.117 matmul_kernel_tma_persistent [M=8192, N=8192, K=896]                          
+├─ 202.506 6786.894 matmul_kernel_tma_persistent_ws [M=8192, N=8192, K=1024]                                                                                                                        
+├─ 172.481 996.043 matmul_kernel_tma_persistent_ws [M=8192, N=8192, K=128]                        
+├─ 178.462 1925.328 matmul_kernel_tma_persistent_ws [M=8192, N=8192, K=256]                                                                                                                         
+├─ 191.341 2693.602 matmul_kernel_tma_persistent_ws [M=8192, N=8192, K=384]                                                                                                                         
+├─ 197.525 3479.027 matmul_kernel_tma_persistent_ws [M=8192, N=8192, K=512]                                                                                                                         
+├─ 199.419 4307.491 matmul_kernel_tma_persistent_ws [M=8192, N=8192, K=640]                                                                                                                         
+├─ 200.859 5131.922 matmul_kernel_tma_persistent_ws [M=8192, N=8192, K=768]                                                                                                                         
+├─ 201.821 5958.687 matmul_kernel_tma_persistent_ws [M=8192, N=8192, K=896]                                                                                                                         
+├─ 194.799 7055.420 matmul_kernel_tma_ws [M=8192, N=8192, K=1024]                                 
+├─ 123.441 1391.747 matmul_kernel_tma_ws [M=8192, N=8192, K=128]                                  
+├─ 152.096 2259.077 matmul_kernel_tma_ws [M=8192, N=8192, K=256]                                  
+├─ 172.785 2982.877 matmul_kernel_tma_ws [M=8192, N=8192, K=384]                                  
+├─ 181.091 3794.752 matmul_kernel_tma_ws [M=8192, N=8192, K=512]                                  
+├─ 186.284 4611.216 matmul_kernel_tma_ws [M=8192, N=8192, K=640]                                  
+├─ 189.960 5426.361 matmul_kernel_tma_ws [M=8192, N=8192, K=768]                                  
+└─ 192.663 6241.934 matmul_kernel_tma_ws [M=8192, N=8192, K=896] 
+```

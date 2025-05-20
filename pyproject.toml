@@ -25,6 +25,7 @@ dependencies = [
     "tensorboard",
     "tabulate",
     "humanfriendly",
+    "llnl-hatchet",
 ]
 
 [project.optional-dependencies]
