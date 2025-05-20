@@ -297,41 +297,44 @@ def flash_fwd_kernel(
     # easier compiler to unroll and optimize the loop
     for tile_idx in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
         k_offset = tile_idx * K_TILE_SIZE
-        # Adjust K and V block pointers for this tile
-        K_block_ptr_k = K_block_ptr.advance((k_offset, 0))
-        V_block_ptr_k = V_block_ptr.advance((k_offset, 0))
+        # If this tile is fully masked, skip
+        fully_masked = is_casual and k_offset >= q_offset + Q_TILE_SIZE
+        if not fully_masked:
+            # Adjust K and V block pointers for this tile
+            K_block_ptr_k = K_block_ptr.advance((k_offset, 0))
+            V_block_ptr_k = V_block_ptr.advance((k_offset, 0))
 
-        # inserts a 0.0 for any out-of-bounds elements to avoid reading past N_KEY
-        K_tile = tl.load(K_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
-        V_tile = tl.load(V_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
+            # inserts a 0.0 for any out-of-bounds elements to avoid reading past N_KEY
+            K_tile = tl.load(K_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
+            V_tile = tl.load(V_block_ptr_k, boundary_check=(0, 1), padding_option="zero")  # (Bk, D)
 
-        # mask to prevent reading past N_KEY
-        mask = ((tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS)[None, :]  # shape: (1, Bk)
+            # mask to prevent reading past N_KEY
+            mask = ((tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS)[None, :]  # shape: (1, Bk)
 
-        if is_casual:
-            # causal mask should be of shape (Bq, Bk)
-            query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
-            key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
-            mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
+            if is_casual:
+                # causal mask should be of shape (Bq, Bk)
+                query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
+                key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
+                mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
 
-        # Compute the attention scores, ensuring that invalid elements are masked
-        # (Bq, D) @ (Bk, D)^T = (Bq, Bk)
-        scores = tl.where(mask, tl.dot(Q_tile, K_tile.T).to(tl.float32) * scale, float("-inf"))
+            # Compute the attention scores, ensuring that invalid elements are masked
+            # (Bq, D) @ (Bk, D)^T = (Bq, Bk)
+            scores = tl.where(mask, tl.dot(Q_tile, K_tile.T).to(tl.float32) * scale, float("-inf"))
 
-        row_max = tl.max(scores, axis=-1, keep_dims=False)  # (Bq,)
-        new_max = tl.maximum(m_tile, row_max)  # elementwise max
+            row_max = tl.max(scores, axis=-1, keep_dims=False)  # (Bq,)
+            new_max = tl.maximum(m_tile, row_max)  # elementwise max
 
-        # unnormalized softmax values (numerator)
-        P_j = tl.exp(scores - new_max[:, None])  # (Bq, Bk)
-        row_sum_P_j = tl.sum(P_j, axis=-1, keep_dims=False)  # (Bq,)
-        exp_m_diff = tl.exp(m_tile - new_max)  # (Bq,)
-        l_tile = exp_m_diff * l_tile + row_sum_P_j  # (Bq,)
+            # unnormalized softmax values (numerator)
+            P_j = tl.exp(scores - new_max[:, None])  # (Bq, Bk)
+            row_sum_P_j = tl.sum(P_j, axis=-1, keep_dims=False)  # (Bq,)
+            exp_m_diff = tl.exp(m_tile - new_max)  # (Bq,)
+            l_tile = exp_m_diff * l_tile + row_sum_P_j  # (Bq,)
 
-        # diag(exp_m_diff) * O_tile
-        # P_j (Bq, Bk) * V_tile (Bk, D) = (Bq, D)
-        O_tile = exp_m_diff[:, None] * O_tile + tl.dot(P_j, V_tile.to(tl.float32))
+            # diag(exp_m_diff) * O_tile
+            # P_j (Bq, Bk) * V_tile (Bk, D) = (Bq, D)
+            O_tile = exp_m_diff[:, None] * O_tile + tl.dot(P_j, V_tile.to(tl.float32))
 
-        m_tile = new_max  # update the max for the next iteration
+            m_tile = new_max  # update the max for the next iteration
 
     # diag(l_tile)^-1 * O_tile
     O_tile = O_tile / l_tile[:, None]
@@ -402,6 +405,10 @@ def flash_bwd_dkv_kernel(
 
     if k_offset >= N_KEYS:
         return
+
+    fully_masked = is_casual and (k_offset > N_QUERIES - 1)
+    if fully_masked:
+        return  # All queries are before this key block, causal mask zeroes everything
 
     # Offset each pointer with the corresponding batch index
     # multiplied with the batch stride for each tensor
@@ -485,37 +492,40 @@ def flash_bwd_dkv_kernel(
 
     for query_tile_index in range(tl.cdiv(N_QUERIES, Q_TILE_SIZE)):
         q_offset = query_tile_index * Q_TILE_SIZE
+        query_fully_masked = is_casual and (q_offset + Q_TILE_SIZE - 1 < k_offset)
+        if not query_fully_masked:
+            Q_tile = tl.load(Q_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
+                tl.float32
+            )
+            O_tile = tl.load(O_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
+                tl.float32
+            )
+            dO_tile = tl.load(dO_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
+                tl.float32
+            )
+            L_tile = tl.load(L_block_ptr.advance((q_offset,)), boundary_check=(0,), padding_option="zero").to(
+                tl.float32
+            )
 
-        Q_tile = tl.load(Q_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
-            tl.float32
-        )
-        O_tile = tl.load(O_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
-            tl.float32
-        )
-        dO_tile = tl.load(dO_block_ptr.advance((q_offset, 0)), boundary_check=(0, 1), padding_option="zero").to(
-            tl.float32
-        )
-        L_tile = tl.load(L_block_ptr.advance((q_offset,)), boundary_check=(0,), padding_option="zero").to(tl.float32)
+            # mask to prevent reading past N_QUERIES
+            mask = ((tl.arange(0, Q_TILE_SIZE) + q_offset) < N_QUERIES)[:, None]  # shape: (Bq, 1)
+            if is_casual:
+                # causal mask should be of shape (Bq, Bk)
+                query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
+                key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
+                mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
 
-        # mask to prevent reading past N_QUERIES
-        mask = ((tl.arange(0, Q_TILE_SIZE) + q_offset) < N_QUERIES)[:, None]  # shape: (Bq, 1)
-        if is_casual:
-            # causal mask should be of shape (Bq, Bk)
-            query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
-            key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
-            mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
+            # ensure that accumulation is done in float32
+            D_tile = tl.sum(O_tile * dO_tile, axis=1)
 
-        # ensure that accumulation is done in float32
-        D_tile = tl.sum(O_tile * dO_tile, axis=1)
-
-        S = tl.dot(Q_tile, K_tile.T) * scale  # (Bq, Bk)
-        # don't need to compute softmax because we have logsumexp. P = softmax(S, dim=-1)
-        P = tl.exp(S - L_tile[:, None])  # (Bq, Bk)
-        P = tl.where(mask, P, 0.0)
-        dV_tile += tl.dot(P.T, dO_tile)  # (Bk,Bq)*(Bq,d)->(Bk, d)
-        dP = tl.dot(dO_tile, V_tile.T)  # (Bq, d)*(d, Bk)->(Bq, Bk)
-        dS = P * (dP - D_tile[:, None]) * scale  # (Bq, Bk)
-        dK_tile += tl.dot(dS.T, Q_tile)  # (Bk, Bq)*(Bq, d)->(Bk, d)
+            S = tl.dot(Q_tile, K_tile.T) * scale  # (Bq, Bk)
+            # don't need to compute softmax because we have logsumexp. P = softmax(S, dim=-1)
+            P = tl.exp(S - L_tile[:, None])  # (Bq, Bk)
+            P = tl.where(mask, P, 0.0)
+            dV_tile += tl.dot(P.T, dO_tile)  # (Bk,Bq)*(Bq,d)->(Bk, d)
+            dP = tl.dot(dO_tile, V_tile.T)  # (Bq, d)*(d, Bk)->(Bq, Bk)
+            dS = P * (dP - D_tile[:, None]) * scale  # (Bq, Bk)
+            dK_tile += tl.dot(dS.T, Q_tile)  # (Bk, Bq)*(Bq, d)->(Bk, d)
 
     tl.store(dK_block_ptr, dK_tile.to(dtype), boundary_check=(0, 1))
     tl.store(dV_block_ptr, dV_tile.to(dtype), boundary_check=(0, 1))
@@ -642,27 +652,28 @@ def flash_bwd_dq_kernel(
 
     for key_tile_index in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
         k_offset = key_tile_index * K_TILE_SIZE
+        fully_masked = is_casual and (k_offset > q_offset + Q_TILE_SIZE - 1)
+        if not fully_masked:
+            K_tile = tl.load(K_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
+            V_tile = tl.load(V_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
 
-        K_tile = tl.load(K_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
-        V_tile = tl.load(V_block_ptr.advance((k_offset, 0)), boundary_check=(0, 1)).to(tl.float32)
+            # mask to prevent reading past N_KEY
+            mask = ((tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS)[None, :]  # shape: (1, Bk)
 
-        # mask to prevent reading past N_KEY
-        mask = ((tl.arange(0, K_TILE_SIZE) + k_offset) < N_KEYS)[None, :]  # shape: (1, Bk)
+            if is_casual:
+                # causal mask should be of shape (Bq, Bk)
+                query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
+                key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
+                mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
 
-        if is_casual:
-            # causal mask should be of shape (Bq, Bk)
-            query_indices = tl.arange(0, Q_TILE_SIZE) + q_offset
-            key_indices = tl.arange(0, K_TILE_SIZE) + k_offset
-            mask = tl.where(query_indices[:, None] >= key_indices[None, :], mask, False)
+            S = tl.dot(Q_tile, K_tile.T) * scale
+            P = tl.exp(S - L_tile[:, None])  # softmax weights
+            P = tl.where(mask, P, 0.0)  # apply mask
 
-        S = tl.dot(Q_tile, K_tile.T) * scale
-        P = tl.exp(S - L_tile[:, None])  # softmax weights
-        P = tl.where(mask, P, 0.0)  # apply mask
+            dP = tl.dot(dO_tile, V_tile.T)
+            dS = P * (dP - D_tile[:, None]) * scale
 
-        dP = tl.dot(dO_tile, V_tile.T)
-        dS = P * (dP - D_tile[:, None]) * scale
-
-        dQ_tile += tl.dot(dS, K_tile)
+            dQ_tile += tl.dot(dS, K_tile)
 
     tl.store(dQ_block_ptr, dQ_tile.to(dtype), boundary_check=(0, 1))
 
