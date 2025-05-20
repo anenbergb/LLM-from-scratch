@@ -153,14 +153,54 @@ References:
 - https://stanford-cs336.github.io/spring2025-lectures/?trace=var/traces/lecture_06.json
 
 
-# Flash Attention Implementation
+# High-Performance Flash Attention Implementation
 
-I implemented the following optimizations to the baseline Flash Attention 2 algorithm
+I implemented the following optimizations on top of the baseline Flash Attention v2 algorithm
 - Added `@triton.autotune` to tune the tile sizes (Q_TILE_SIZE and K_TILE_SIZE) per kernel
 - Optimized the backward pass to perform two passes over the input, one for dQ and another for dK and dV to avoid atomics or synchronization between blocks.
 - Skip tiles that are fully masked (causal masking) to eliminate unnecessary computation 
 - Avoid per-element masking for tiles that are guarenteed to be fully valid -- e.g. those squarely beneath the lower diagonal
 - Only apply causal masking to the diagonal tiles
+
+I benchmarked my FlashAttention v2 implementation and observed a **\~7× speedup** in inference performance compared to the naive PyTorch version. This was measured using Query, Key, and Value tensors with batch size 1, sequence length 13,312, embedding dimension 64, causal masking enabled, and the bfloat16 data type. All experiments were conducted on an NVIDIA RTX 5090 GPU.
+
+
+[python llm/tools/benchmark_flash_attention.py](llm/tools/benchmark_flash_attention.py)
+
+![latency_torch bfloat16](https://github.com/user-attachments/assets/930519db-25ef-4b37-9cbb-e74b26683669)
+
+|   Seq Len |   D Head | Dtype    | PyTorch (ms)   | Compiled (ms)   | Triton (ms)   | PyTorch (GB)   | Compiled (GB)   | Triton (GB)   |                                                           
+|-----------|----------|----------|----------------|-----------------|---------------|----------------|-----------------|---------------|                                                           
+|       128 |       64 | bfloat16 | 0.22           | 0.08            | 0.07          | 2.32           | 2.47            | 3.84          |                                                           
+|       128 |      128 | bfloat16 | 0.20           | 0.14            | 0.15          | 4.11           | 4.11            | 5.49          |                                                           
+|       512 |       64 | bfloat16 | 0.35           | 0.16            | 0.14          | 5.50           | 5.58            | 5.59          |                                                           
+|       512 |      128 | bfloat16 | 0.26           | 0.20            | 0.29          | 5.58           | 5.58            | 5.58          |                                                           
+|      1024 |       64 | bfloat16 | 0.70           | 0.33            | 0.28          | 5.58           | 5.59            | 5.59          |                                                           
+|      1024 |      128 | bfloat16 | 1.03           | 0.50            | 0.72          | 5.59           | 5.59            | 5.59          |                                                           
+|      8192 |       64 | bfloat16 | 52.46          | 28.18           | 7.70          | 15.57          | 9.68            | 9.73          |
+|      8192 |      128 | bfloat16 | 56.00          | 35.44           | 26.79         | 19.70          | 13.52           | 13.52         |
+|     13312 |       64 | bfloat16 |         **136.71** |           **47.99** |         **19.57** |          29.55 |           24.64 |         26.19 |
+|     16384 |       64 | bfloat16 | N/A            | 73.39           | 28.29         | N/A            | 28.25           | 28.41         |
+|     16384 |      128 | bfloat16 | N/A            | 89.22           | 101.21        | N/A            | 28.63           | 28.89         |
+|     32768 |       64 | bfloat16 | N/A            | N/A             | 108.88        | N/A            | N/A             | 28.89         |
+|     32768 |      128 | bfloat16 | N/A            | N/A             | 397.12        | N/A            | N/A             | 29.98         |
+|     65536 |       64 | bfloat16 | N/A            | N/A             | 426.74        | N/A            | N/A             | 29.98         |
+|     65536 |      128 | bfloat16 | N/A            | N/A             | 1574.34       | N/A            | N/A             | 32.15         |
+|       128 |       64 | float32  | 0.21           | N/A             | 0.46          | 27.82          | N/A             | 27.83         |
+|       128 |      128 | float32  | 0.69           | N/A             | 0.24          | 27.83          | N/A             | 27.82         |
+|       512 |       64 | float32  | 0.39           | N/A             | 0.34          | 27.88          | N/A             | 27.84         |
+|       512 |      128 | float32  | 0.68           | N/A             | 0.48          | 27.90          | N/A             | 28.09         |
+|      1024 |       64 | float32  | 1.28           | N/A             | 0.33          | 28.18          | N/A             | 28.12         |
+|      1024 |      128 | float32  | 1.70           | N/A             | 0.91          | 28.25          | N/A             | 28.13         |
+|      8192 |       64 | float32  | N/A            | N/A             | 9.26          | N/A            | N/A             | 28.47         |
+|      8192 |      128 | float32  | N/A            | N/A             | 34.79         | N/A            | N/A             | 28.95         |
+|     16384 |       64 | float32  | N/A            | N/A             | 33.23         | N/A            | N/A             | 28.95         |
+|     16384 |      128 | float32  | N/A            | N/A             | 132.00        | N/A            | N/A             | 30.05         |
+|     32768 |       64 | float32  | N/A            | N/A             | 126.61        | N/A            | N/A             | 30.04         |
+|     32768 |      128 | float32  | N/A            | N/A             | 513.56        | N/A            | N/A             | 32.22         |
+|     65536 |       64 | float32  | N/A            | N/A             | 496.87        | N/A            | N/A             | 32.24         |
+|     65536 |      128 | float32  | N/A            | N/A             | N/A           | N/A            | N/A             | N/A           |
+
 
 TMA (Tensor Memory Accelerator) is a hardware feature to accelerate blockwise asynchronous memory transfers, particularly in support of Tensor Cores and high-efficiency shared memory usage.
 - https://research.colfax-intl.com/tutorial-hopper-tma
