@@ -164,8 +164,9 @@ I implemented the following optimizations on top of the baseline Flash Attention
 
 I benchmarked my FlashAttention v2 implementation and observed a **\~7× speedup** in inference performance compared to the naive PyTorch version. This was measured using Query, Key, and Value tensors with batch size 1, sequence length 13,312, embedding dimension 64, causal masking enabled, and the bfloat16 data type. All experiments were conducted on an NVIDIA RTX 5090 GPU.
 
+[flash attention implementation](llm/flash_attention.py)
 
-[python llm/tools/benchmark_flash_attention.py](llm/tools/benchmark_flash_attention.py)
+[benchmarking script](llm/tools/benchmark_flash_attention.py) `python llm/tools/benchmark_flash_attention.py`
 
 ![latency_torch bfloat16](https://github.com/user-attachments/assets/930519db-25ef-4b37-9cbb-e74b26683669)
 
