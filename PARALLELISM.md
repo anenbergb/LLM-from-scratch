@@ -109,7 +109,7 @@ So you effectively have a fixed maximum batch size and you can spend it in diffe
 - Split up model parameters across GPUs (like ZeRO3)
 - But communicate activations (while ZeRO3 sends params).
 
-#### 1. Pipeline Parallelism (PP)
+### 1. Pipeline Parallelism (PP)
 
 Layer-wise: The model is split layerwise into multiple stages, where each stage is run on a different device. This will result in poor GPU utilization as each GPU waits for gradients of previous layer. 
 
@@ -129,7 +129,7 @@ better memory-wise scaling.
 
 <img width="800" src="https://github.com/user-attachments/assets/01a92fb4-427c-49b4-bdeb-6ac5e7767108" />
 
-#### 2. Tensor Parallelism (TP)
+### 2. Tensor Parallelism (TP)
 Activations are sharded across a new dimension, and each device
 computes the output results for their own shard. With Tensor Parallel we can either shard along
 the inputs or the outputs the operation we are sharding. Tensor Parallelism can be used effectively
