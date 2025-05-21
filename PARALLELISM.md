@@ -218,15 +218,22 @@ Have to balance limited resource – memory, bandwidth, batch size
 
 - if your batch size is small, use gradient accumulation to trade higher batch sizes for better communication efficiency since you're synchronizing less often across machines.
 
-## 🧪 Real-World Examples
+For example,
+- Tensor parallel first up to 8, then caps out at 8.
+- Pipeline parallel goes up to make the model fit.
+- data parallel gradually decreases with scale, with the largest model having DP=6
+
+## Real-World Examples
 
 - **Dolma 7B**: FSDP (ZeRO Stage 3)
 - **DeepSeek**: ZeRO1 + Tensor + Pipeline + Sequence
 - **Yi**: ZeRO1 + Tensor + Pipeline; Yi-Lightning uses Expert parallel
-- **LLaMA3 405B**: Mixed strategies per training stage
+- **LLaMA3 405B**: Mixed strategies per training stage. https://arxiv.org/abs/2407.21783
 - **Gemma 2 (2B, 9B, 27B)**: ZeRO-3, Model Parallel (TP+SP), Data Parallel
 
-## 🧾 Final Recap
+need fault tolerant architectures because the GPUs will fail during training at scale
+ 
+## Final Recap
 
 - **Scaling requires** multi-GPU/multi-node setups.
 - **No single parallelism method suffices**—combine strategies.
