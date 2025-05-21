@@ -1,4 +1,4 @@
-# Parallelism
+<img width="628" alt="Screenshot 2025-05-20 at 5 38 10 PM" src="https://github.com/user-attachments/assets/a3db71ce-749b-460c-8a44-35222c5df775" /># Parallelism
 
 ## Part 1: Networking Basics for LLMs
 
@@ -110,15 +110,25 @@ So you effectively have a fixed maximum batch size and you can spend it in diffe
 - Split up model parameters across GPUs (like ZeRO3)
 - But communicate activations (while ZeRO3 sends params).
 
-
-
 #### 1. Pipeline Parallelism (PP)
-The model is split layerwise into multiple stages, where each stage is
-run on a different device.
 
+Layer-wise: The model is split layerwise into multiple stages, where each stage is run on a different device. This will result in poor GPU utilization as each GPU waits for gradients of previous layer. 
+
+Pipeline parallel:
 - Split layers across GPUs
-- Use **micro-batches** to reduce idle time. (Don't just split the model by layers)
-- Good for memory savings, especially across nodes
+- Use **micro-batches** to reduce idle time. Send off a microbatch, then start computing next microbatch. Requires a sufficiently large overall batch size to hide the "bubble"
+- Good for memory savings (compared to data parallel), especially across nodes
+- Pipeline has good communication properties (compared to FSDP) - it only depends only on activations (𝑏 × 𝑠 × ℎ) and is point to point
+
+Pipelines should be used on slower network links (i.e. inter-node) as a way to get
+better memory-wise scaling.
+
+<img width="400"  src="https://github.com/user-attachments/assets/a66209e2-3b3a-4c3a-92ef-f1de815530e6" />
+
+**Zero bubble pipelining**
+- can be very complicated
+
+<img width="800" src="https://github.com/user-attachments/assets/01a92fb4-427c-49b4-bdeb-6ac5e7767108" />
 
 #### 2. Tensor Parallelism (TP)
 Activations are sharded across a new dimension, and each device
@@ -126,9 +136,26 @@ computes the output results for their own shard. With Tensor Parallel we can eit
 the inputs or the outputs the operation we are sharding. Tensor Parallelism can be used effectively
 together with FSDP if we shard the weights and the activations along corresponding dimensions.
 
-- Split matrices across GPUs (columns/rows)
-- All-reduce required in forward/backward passes
-- Ideal within a node (fast interconnects)
+<img width="289" src="https://github.com/user-attachments/assets/dba035be-43b8-4cae-ac57-16b0b1c5ac0d" />
+
+- Can be used for any matrix multiply by breaking into submatrices
+- Split matrices across GPUs (columns/rows). Split matrices along width dimension.
+- All-reduce required in forward/backward passes!
+- Ideal within a node (fast interconnects), e.g. the 8 GPUs on a single node.
+
+####  🔄 Tensor vs Pipeline Parallelism
+
+✅ Pros of Tensor Parallelism
+- **No idle time**: No bubbles if network is fast — no waiting for other devices.
+- **Low complexity**: Easy to implement without major infrastructure changes.
+- **Works with small batches**: Doesn't require large batch sizes.
+
+❌ Cons of Tensor Parallelism
+- **High communication overhead**, especially compared to pipeline parallelism.
+  - **Pipeline**: `bsh` (batch × sequence × hidden) point-to-point communication per microbatch.
+  - **Tensor**: `8 × bsh × ((n_devices - 1) / n_devices)` per layer with all-reduce operations.
+
+> Use tensor parallelism when you have low-latency, high-bandwidth interconnects.
 
 ### Sequence Parallelism
 - Split activations across the **sequence** axis
