@@ -138,6 +138,60 @@ https://arxiv.org/abs/2405.12981
 - Lower-dimensional KV cache (GQA, MLA, shared KV cache)
 - Local attention on some of the layers
 
+# Alternatives to the Transformer
+Attention + autoregression is fundamentally memory-limited (Transformers were not designed with inference in mind).
+
+### State-space models
+- Idea: from signal processing to model long-context sequences in a sub-quadratic time
+
+**S4:** based on classic state space models, good at synthetic long-context tasks
+  - https://arxiv.org/abs/2111.00396
+  - https://docs.google.com/presentation/d/1wrQO4uzwWr73SGj7aFxeVR9Cz0PY-mzJipn12enM39k/edit#slide=id.p
+
+<img width="800" src="https://github.com/user-attachments/assets/7d5ca420-825b-4969-994a-d5872f9bf2df" />
+
+Weaknesses:
+- bad at solving associative recall tasks important for language (where Transformers do well)
+- good for signal processing tasks, but bad at isolating single key/value pair to get the answer
+
+
+<img width="400" src="https://github.com/user-attachments/assets/c27df063-aa2a-4676-8060-c44ceb33b82b" />
+
+**Mamba**: allow SSM parameters to be input-dependent, match Transformers at 1B scale
+- https://arxiv.org/abs/2312.00752
+ 
+**Jamba:** interleave Transformer-Mamba layers (1:7 ratio) with a 52B MoE
+- speedup by only using Tranformer every 8 layers
+- https://arxiv.org/abs/2403.19887
+
+<img width="500" src="https://github.com/user-attachments/assets/0c9a7fa6-ea00-4577-82e3-e09574d50e47" />
+
+**BASED:** use linear attention + local attention
+- https://arxiv.org/abs/2402.18668
+
+<img width="500" src="https://github.com/user-attachments/assets/e04feba0-2185-4b9e-9325-9fe4fcc78a71" />
+
+**MiniMax-01:** use linear attention + full attention (456B parameter MoE)
+- https://arxiv.org/pdf/2501.08313
+
+
+**Takeaways:**
+- Linear + local attention (still need some full attention) yield serious SOTA models
+- Replace O(T) KV cache with O(1) state => much more efficient for inference
+
+### Diffusion Models
+- Popular for image generation, but harder to get working for text generation
+- https://arxiv.org/abs/2205.14217
+
+<img width="600" src="https://github.com/user-attachments/assets/bf41799d-f466-4d78-9446-e6fa73d3f4f6" />
+   
+- Idea: generate each token in parallel (not autoregressively), refine multiple time steps
+- Start with random noise (over entire sequence), iteratively refine it
+
+<img width="600" src="https://github.com/user-attachments/assets/9c917a3e-6cf2-4ebb-be56-0623adccdd82" />
+
+- significant gains in inference
+
 
 ## References:
 - https://jax-ml.github.io/scaling-book/
