@@ -1,29 +1,87 @@
 # Parallelism
 ## Part 1: Networking Basics for LLMs
 
-### Limits of GPU-based Scaling
+**Limits of GPU-based Scaling**
 - **Compute**: Even the fastest supercomputers must parallelize workloads.
 - **Memory**: Single GPUs can't hold massive models.
 
-### Solution: Multi-GPU/Multi-node Parallelism
-- Intra-node: High-speed interconnects within a machine.
-- Inter-node: High-speed networking across machines.
+**Solution: Multi-GPU/Multi-node Parallelism**
+- Intra-node: High-speed interconnects within a machine. NVLink connects GPUs directly, bypass CPU
+- Inter-node: High-speed networking across machines. NVSwitch connects GPUs directly, bypass Ethernet
 
-### Collective Communication Primitives
-- **All Reduce**, **Broadcast**, **Reduce**, **All Gather**, **Reduce Scatter**
-- `Reduce = Reduce-Scatter + All-Gather`
+<img width="400" src="https://github.com/user-attachments/assets/c75cf7b7-d6e6-4fde-bb2e-feb0447ed918" />
 
-<img width="600" src="https://github.com/user-attachments/assets/5dec072e-52ab-470a-b1da-ad9a7f2b6faa" />
+**Generalized hierarchy (from small/fast to big/slow):**
+- Single node, single GPU: L1 cache / shared memory
+- Single node, single GPU: HBM
+- Single node, multi-GPU: NVLink
+- Multi-node, multi-GPU: NVSwitch
 
-<img width="400" src="https://github.com/user-attachments/assets/41d08b56-3405-400f-afee-d8a8762acce2" />
+**Collective Communication Primitives**
+- Reduce: performs some associative/commutative operation (sum, min, max) 
+- Broadcast/scatter is inverse of gather
+- All: means destination is all devices
 
+**Broadcast**
+
+<img width="400" src="https://github.com/user-attachments/assets/d089dd46-2005-4d38-8e94-2134c09ed7e5" />
+
+**Scatter**
+- tensor is split up and sent to different GPUs
+
+<img width="400" src="https://github.com/user-attachments/assets/440fd41f-cb0d-41c6-a749-32af5c2e144f" />
+
+**Gather**
+
+<img width="400" src="https://github.com/user-attachments/assets/efdcc2f2-6b84-4e93-ab27-5dbc37a700a7" />
+
+**Reduce**
+
+<img width="400" src="https://github.com/user-attachments/assets/71741252-ac01-4ba7-a2be-19f72e9a8e41" />
+
+**All-gather**
+
+<img width="400" src="https://github.com/user-attachments/assets/ef2ce99b-8f3c-47fa-a4b1-c14b2e0c4127" />
+
+**Reduce-scatter**
+
+<img width="400" src="https://github.com/user-attachments/assets/92c01411-957b-4fe8-a8a7-31e6c1a40abf" />
+
+**All-reduce = reduce-scatter + all-gather**
+
+<img width="400" src="https://github.com/user-attachments/assets/c459fb80-c643-4a8b-947a-fe70cd11e925" />
+
+### NVIDIA Collective Communication Library (NCCL)
+- NCCL translates collective operations into low-level packets that are sent between GPUs
+- Detects topology of hardware (e.g., number of nodes, switches, NVLink/PCIe)
+- Optimizes the path between GPUs
+- Launches CUDA kernels to send/receive data
+
+### PyTorch distributed library (torch.distributed)
+- Provides clean interface for collective operations (e.g., all_gather_into_tensor)
+- Supports multiple backends for different hardware: gloo (CPU), nccl (GPU)
+- Also supports higher-level algorithms (e.g., FullyShardedDataParallel) 
 ## Part 2: Parallel LLM Training Forms
 
+**Quick Overview**
+- **data parallelism**: Cut up along the batch dimension
+- **tensor/expert parallelism**: Cut up along the width dimension
+- **pipeline parallelism**: Cut up along the depth dimension
+- **sequence parallelism**: Cut up along the length
+- Can re-compute or store in memory or store in another GPUs memory and communicate
+- Hardware is getting faster, but will always want bigger models, so will have this hierarchical structure
+
 ### Data parallelism
+Sharding strategy: each rank gets a slice of the data
 
-Batches of data are split across multiple devices, and each device computes
-gradients for their own batch. These gradients must somehow be averaged across devices.
+<img width="200" src="https://github.com/user-attachments/assets/867723b8-5b0e-4a47-87fa-e4efe03e34e2" />
 
+**Steps**
+- batch of data is split across GPUs
+- each GPU comutes gradients for their own batch
+- `dist.all_reduce(op=AVG)` to average the gradients per param across GPUs, then `optimizer.step()`
+
+**Summary**
 - Compute scaling – each GPU gets B/M examples.
 - Communication overhead – transmits 2x # params every batch. OK if batches are big
 - Memory scaling – none. Every GPU needs # params at least
@@ -110,17 +168,21 @@ So you effectively have a fixed maximum batch size and you can spend it in diffe
 - But communicate activations (while ZeRO3 sends params).
 
 ### 1. Pipeline Parallelism (PP)
+Sharding strategy: each rank gets subset of layers, transfer all data/activations
+- Layer-wise: The model is split layerwise into multiple stages, where each stage is run on a different device. This will result in poor GPU utilization as each GPU waits for gradients of previous layer. 
 
-Layer-wise: The model is split layerwise into multiple stages, where each stage is run on a different device. This will result in poor GPU utilization as each GPU waits for gradients of previous layer. 
+<img width="200" src="https://github.com/user-attachments/assets/134e6b9f-0b16-4cab-838d-06ccda3517e2" />
 
-Pipeline parallel:
+**Steps:**
 - Split layers across GPUs
-- Use **micro-batches** to reduce idle time. Send off a microbatch, then start computing next microbatch. Requires a sufficiently large overall batch size to hide the "bubble"
+- Split data batch into **micro-batches** to reduce idle time. Requires a sufficiently large overall batch size to hide the "bubble"
+- Each GPU will wait for previous rank to pass it the activations, then it will run `.forward()` on it's subset of layers, and `dist.send(tensor=x, dst=rank+1)` the activations to the next GPU
+- Each GPU will start computing on the next microbatch
+
+**Benefits:**
 - Good for memory savings (compared to data parallel), especially across nodes
 - Pipeline has good communication properties (compared to FSDP) - it only depends only on activations (𝑏 × 𝑠 × ℎ) and is point to point
-
-Pipelines should be used on slower network links (i.e. inter-node) as a way to get
-better memory-wise scaling.
+- Pipelines should be used on slower network links (i.e. inter-node) as a way to get better memory-wise scaling.
 
 <img width="400"  src="https://github.com/user-attachments/assets/a66209e2-3b3a-4c3a-92ef-f1de815530e6" />
 
@@ -130,17 +192,23 @@ better memory-wise scaling.
 <img width="800" src="https://github.com/user-attachments/assets/01a92fb4-427c-49b4-bdeb-6ac5e7767108" />
 
 ### 2. Tensor Parallelism (TP)
-Activations are sharded across a new dimension, and each device
-computes the output results for their own shard. With Tensor Parallel we can either shard along
-the inputs or the outputs the operation we are sharding. Tensor Parallelism can be used effectively
-together with FSDP if we shard the weights and the activations along corresponding dimensions.
+Sharding strategy: each rank gets part of each layer, transfer all data/activations. Cut the model along the hidden dimension.
+Each GPU gets every layer, but only a slice of the hidden dimension of each layer.
+
+<img width="200" src="https://github.com/user-attachments/assets/91071728-4cae-4a10-95ca-a8a8a2177336" />
+
+**Steps**
+- Split model along hidden dim
+- Each GPU has a slice of the activations
+- `dist.all_gather` to the activations so every GPU has activations of the whole model
 
 <img width="289" src="https://github.com/user-attachments/assets/dba035be-43b8-4cae-ac57-16b0b1c5ac0d" />
 
 - Can be used for any matrix multiply by breaking into submatrices
-- Split matrices across GPUs (columns/rows). Split matrices along width dimension.
+- Split matrices across GPUs (columns/rows). Split matrices along width (hidden) dimension.
 - All-reduce required in forward/backward passes!
 - Ideal within a node (fast interconnects), e.g. the 8 GPUs on a single node.
+- Tensor Parallelism can be used effectively together with FSDP if we shard the weights and the activations along corresponding dimensions.
 
 #### Tensor vs Pipeline Parallelism
 
