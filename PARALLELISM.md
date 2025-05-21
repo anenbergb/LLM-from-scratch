@@ -37,12 +37,6 @@ gradients for their own batch. These gradients must somehow be averaged across d
 - **Stage 2**: Shard gradients too
 - **Stage 3 (FSDP)**: Shard everything (params, grads, states)
 
-#### Fully-Sharded Data Parallelism (FSDP)
-Optimizer states, gradients, and weights are split
-across devices. If we’re using only DP and FSDP, every device needs to gather the weight shards from
-all other devices before we can perform our forward or backward pass.
-
-
 #### ZeRO: Solve memory overhead issue of DP
 Split up the expensive parts (state) and use the reduce-scatter equivalent
 
@@ -52,7 +46,7 @@ Split up the expensive parts (state) and use the reduce-scatter equivalent
 - Shard optimizer state (first + second moments) across GPUs
 - all GPUs have parameters + gradients
 - Each worker is responsible for updating a subset of params (corresponding to their slice)
-1. all GPUs compute full gradient on their subset of the batch
+1. All GPUs compute full gradient on their subset of the batch
 2. ReduceScatter the gradients - incur #params communication cost
 3. Each machine updates their params using their gradient + state
 4. All Gather the parameters - incur #params communication cost
@@ -61,47 +55,77 @@ Split up the expensive parts (state) and use the reduce-scatter equivalent
 - Shard gradients too
 - we can never instantiate a full gradient vector, but each worker must compute a full gradient (since we’re data parallel)
 1. Everyone incrementally goes backward on the computation graph
+-  After computing a layer’s gradients, immediately reduce to send this to the
+right worker
+- Once gradients are not needed in the backward graph, immediately free it.
+2. Each machine updates their param using their gradient + state.
+3. All Gather the parameters.
+
+**Stage 3: Fully-Sharded Data Parallelism (FSDP)**
+- Shard everything (params, grads, states)
+- Each GPU device needs to gather the weight shards from all other GPUs before we can perform our forward or backward pass.
+- Send and request parameters on demand while stepping through the compute graph.
+
+Incremental computation / communication
+- Parameters / gradients are requested / sent and then immediately freed
+
+Overlapping communication and computation
+- The all-gathers happen all at once while forward happens, masking the comm cost.
+  
+<img width="800" src="https://github.com/user-attachments/assets/665a3771-6db2-4d3a-8b71-9f5fc20a384d" />
 
 #### ZeRO Trade-offs
 | Stage       | Comm Cost       | Memory Usage                |
 |-------------|------------------|-----------------------------|
 | Naive DDP   | 2 * #params       | High                        |
-| ZeRO Stage 1| 2 * #params       | Reduced (sharded state)     |
-| ZeRO Stage 2| 2 * #params       | Further reduced             |
+| ZeRO Stage 1| 2 * #params      | Reduced (sharded state)     |
+| ZeRO Stage 2| 2 * #params      | Further reduced             |
 | ZeRO Stage 3| 3 * #params       | Lowest (fully sharded)      |
 
+It doesn't require any knowledge of the model architecture!
+
+#### ZeRO in Practice: Will It Fit?
+
+It's possible to train larger LLM models when using higher degrees of ZeRO data parallelism. 
+
+The following results were performed using bfloat16 with 8× A100 80GB GPUs
+
+| Strategy       | Max Size (Params) | Formula for Bytes per Param |
+|----------------|-------------------|------------------------------|
+| **Baseline**   | 6.66B             | 12                           |
+| **ZeRO Stage 1** | 16B              | 5                            |
+| **ZeRO Stage 2** | 24.62B           | 2 (param) + (10 grad+state)/8 |
+| **ZeRO Stage 3** | 53.33B           | 12 / 8                       |
+
+
+- https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html
+
+## Part 3: Scaling Models Further
+
+There's diminishing returns to training on larger batch size.
+So you effectively have a fixed maximum batch size and you can spend it in different ways.
 
 ### Model Parallelism
+- Scaling up in memory (without changing batch size) with model parallelism. Enables training with larger models by reducing the activation memory.
+- Split up model parameters across GPUs (like ZeRO3)
+- But communicate activations (while ZeRO3 sends params).
 
-#### Tensor Parallelism (TP)
+
+
+#### 1. Pipeline Parallelism (PP)
+The model is split layerwise into multiple stages, where each stage is
+run on a different device.
+
+- Split layers across GPUs
+- Use **micro-batches** to reduce idle time. (Don't just split the model by layers)
+- Good for memory savings, especially across nodes
+
+#### 2. Tensor Parallelism (TP)
 Activations are sharded across a new dimension, and each device
 computes the output results for their own shard. With Tensor Parallel we can either shard along
 the inputs or the outputs the operation we are sharding. Tensor Parallelism can be used effectively
 together with FSDP if we shard the weights and the activations along corresponding dimensions.
-#### Pipeline Parallelism (PP)
-The model is split layerwise into multiple stages, where each stage is
-run on a different device.
 
-### Activation Parallelism
-- sequence parallel
-
-#### Expert Parallelism (EP)
-We separate experts (in Mixture-of-Experts models) onto different
-devices, and each device computes the output results for their own expert.
-
-
-
----
-
-## 🧩 Part 3: Scaling Models Further
-
-### Model Parallelism
-#### 1. Pipeline Parallelism
-- Split layers across GPUs
-- Use **micro-batches** to reduce idle time
-- Good for memory savings, especially across nodes
-
-#### 2. Tensor Parallelism
 - Split matrices across GPUs (columns/rows)
 - All-reduce required in forward/backward passes
 - Ideal within a node (fast interconnects)
@@ -115,6 +139,16 @@ devices, and each device computes the output results for their own expert.
 - **Recomputation** and **sequence parallelism** can reduce memory use
 
 ---
+
+
+### Activation Parallelism
+- sequence parallel
+
+#### Expert Parallelism (EP)
+We separate experts (in Mixture-of-Experts models) onto different
+devices, and each device computes the output results for their own expert.
+
+
 
 ## 🛠️ Advanced & Hybrid Strategies
 
