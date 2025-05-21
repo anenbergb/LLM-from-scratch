@@ -1,22 +1,66 @@
 # Parallelism
 ## Part 1: Networking Basics for LLMs
 
-### Limits of GPU-based Scaling
+**Limits of GPU-based Scaling**
 - **Compute**: Even the fastest supercomputers must parallelize workloads.
 - **Memory**: Single GPUs can't hold massive models.
 
-### Solution: Multi-GPU/Multi-node Parallelism
-- Intra-node: High-speed interconnects within a machine.
-- Inter-node: High-speed networking across machines.
+**Solution: Multi-GPU/Multi-node Parallelism**
+- Intra-node: High-speed interconnects within a machine. NVLink connects GPUs directly, bypass CPU
+- Inter-node: High-speed networking across machines. NVSwitch connects GPUs directly, bypass Ethernet
 
-### Collective Communication Primitives
-- **All Reduce**, **Broadcast**, **Reduce**, **All Gather**, **Reduce Scatter**
-- `Reduce = Reduce-Scatter + All-Gather`
 
-<img width="600" src="https://github.com/user-attachments/assets/5dec072e-52ab-470a-b1da-ad9a7f2b6faa" />
+<img width="400" src="https://github.com/user-attachments/assets/c75cf7b7-d6e6-4fde-bb2e-feb0447ed918" />
 
-<img width="400" src="https://github.com/user-attachments/assets/41d08b56-3405-400f-afee-d8a8762acce2" />
+**Generalized hierarchy (from small/fast to big/slow):**
+- Single node, single GPU: L1 cache / shared memory
+- Single node, single GPU: HBM
+- Single node, multi-GPU: NVLink
+- Multi-node, multi-GPU: NVSwitch
 
+**Collective Communication Primitives**
+- Reduce: performs some associative/commutative operation (sum, min, max) 
+- Broadcast/scatter is inverse of gather
+- All: means destination is all devices
+
+**Broadcast**
+
+<img width="400" src="https://github.com/user-attachments/assets/d089dd46-2005-4d38-8e94-2134c09ed7e5" />
+
+**Scatter**
+
+<img width="400" src="https://github.com/user-attachments/assets/440fd41f-cb0d-41c6-a749-32af5c2e144f" />
+
+**Gather**
+
+<img width="400" src="https://github.com/user-attachments/assets/efdcc2f2-6b84-4e93-ab27-5dbc37a700a7" />
+
+**Reduce**
+
+<img width="400" src="https://github.com/user-attachments/assets/71741252-ac01-4ba7-a2be-19f72e9a8e41" />
+
+**All-gather**
+
+<img width="400" src="https://github.com/user-attachments/assets/ef2ce99b-8f3c-47fa-a4b1-c14b2e0c4127" />
+
+**Reduce-scatter**
+
+<img width="400" src="https://github.com/user-attachments/assets/92c01411-957b-4fe8-a8a7-31e6c1a40abf" />
+
+**All-reduce = reduce-scatter + all-gather**
+
+<img width="400" src="https://github.com/user-attachments/assets/c459fb80-c643-4a8b-947a-fe70cd11e925" />
+
+### NVIDIA Collective Communication Library (NCCL)
+- NCCL translates collective operations into low-level packets that are sent between GPUs
+- Detects topology of hardware (e.g., number of nodes, switches, NVLink/PCIe)
+- Optimizes the path between GPUs
+- Launches CUDA kernels to send/receive data
+
+### PyTorch distributed library (torch.distributed)
+- Provides clean interface for collective operations (e.g., all_gather_into_tensor)
+- Supports multiple backends for different hardware: gloo (CPU), nccl (GPU)
+- Also supports higher-level algorithms (e.g., FullyShardedDataParallel) 
 ## Part 2: Parallel LLM Training Forms
 
 ### Data parallelism
