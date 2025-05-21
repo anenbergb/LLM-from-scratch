@@ -28,6 +28,7 @@
 <img width="400" src="https://github.com/user-attachments/assets/d089dd46-2005-4d38-8e94-2134c09ed7e5" />
 
 **Scatter**
+- tensor is split up and sent to different GPUs
 
 <img width="400" src="https://github.com/user-attachments/assets/440fd41f-cb0d-41c6-a749-32af5c2e144f" />
 
@@ -64,10 +65,16 @@
 ## Part 2: Parallel LLM Training Forms
 
 ### Data parallelism
+Sharding strategy: each rank gets a slice of the data
 
-Batches of data are split across multiple devices, and each device computes
-gradients for their own batch. These gradients must somehow be averaged across devices.
+<img width="200" src="https://github.com/user-attachments/assets/867723b8-5b0e-4a47-87fa-e4efe03e34e2" />
 
+**Steps**
+- batch of data is split across GPUs
+- each GPU comutes gradients for their own batch
+- `dist.all_reduce(op=AVG)` to average the gradients per param across GPUs, then `optimizer.step()`
+
+**Summary**
 - Compute scaling – each GPU gets B/M examples.
 - Communication overhead – transmits 2x # params every batch. OK if batches are big
 - Memory scaling – none. Every GPU needs # params at least
@@ -154,17 +161,21 @@ So you effectively have a fixed maximum batch size and you can spend it in diffe
 - But communicate activations (while ZeRO3 sends params).
 
 ### 1. Pipeline Parallelism (PP)
+Sharding strategy: each rank gets subset of layers, transfer all data/activations
+- Layer-wise: The model is split layerwise into multiple stages, where each stage is run on a different device. This will result in poor GPU utilization as each GPU waits for gradients of previous layer. 
 
-Layer-wise: The model is split layerwise into multiple stages, where each stage is run on a different device. This will result in poor GPU utilization as each GPU waits for gradients of previous layer. 
+<img width="200" src="https://github.com/user-attachments/assets/134e6b9f-0b16-4cab-838d-06ccda3517e2" />
 
-Pipeline parallel:
+**Steps:**
 - Split layers across GPUs
-- Use **micro-batches** to reduce idle time. Send off a microbatch, then start computing next microbatch. Requires a sufficiently large overall batch size to hide the "bubble"
+- Split data batch into **micro-batches** to reduce idle time. Requires a sufficiently large overall batch size to hide the "bubble"
+- Each GPU will wait for previous rank to pass it the activations, then it will run `.forward()` on it's subset of layers, and `dist.send(tensor=x, dst=rank+1)` the activations to the next GPU
+- Each GPU will start computing on the next microbatch
+
+**Benefits:**
 - Good for memory savings (compared to data parallel), especially across nodes
 - Pipeline has good communication properties (compared to FSDP) - it only depends only on activations (𝑏 × 𝑠 × ℎ) and is point to point
-
-Pipelines should be used on slower network links (i.e. inter-node) as a way to get
-better memory-wise scaling.
+- Pipelines should be used on slower network links (i.e. inter-node) as a way to get better memory-wise scaling.
 
 <img width="400"  src="https://github.com/user-attachments/assets/a66209e2-3b3a-4c3a-92ef-f1de815530e6" />
 
@@ -174,17 +185,23 @@ better memory-wise scaling.
 <img width="800" src="https://github.com/user-attachments/assets/01a92fb4-427c-49b4-bdeb-6ac5e7767108" />
 
 ### 2. Tensor Parallelism (TP)
-Activations are sharded across a new dimension, and each device
-computes the output results for their own shard. With Tensor Parallel we can either shard along
-the inputs or the outputs the operation we are sharding. Tensor Parallelism can be used effectively
-together with FSDP if we shard the weights and the activations along corresponding dimensions.
+Sharding strategy: each rank gets part of each layer, transfer all data/activations. Cut the model along the hidden dimension.
+Each GPU gets every layer, but only a slice of the hidden dimension of each layer.
+
+<img width="200" src="https://github.com/user-attachments/assets/91071728-4cae-4a10-95ca-a8a8a2177336" />
+
+**Steps**
+- Split model along hidden dim
+- Each GPU has a slice of the activations
+- `dist.all_gather` to the activations so every GPU has activations of the whole model
 
 <img width="289" src="https://github.com/user-attachments/assets/dba035be-43b8-4cae-ac57-16b0b1c5ac0d" />
 
 - Can be used for any matrix multiply by breaking into submatrices
-- Split matrices across GPUs (columns/rows). Split matrices along width dimension.
+- Split matrices across GPUs (columns/rows). Split matrices along width (hidden) dimension.
 - All-reduce required in forward/backward passes!
 - Ideal within a node (fast interconnects), e.g. the 8 GPUs on a single node.
+- Tensor Parallelism can be used effectively together with FSDP if we shard the weights and the activations along corresponding dimensions.
 
 #### Tensor vs Pipeline Parallelism
 
