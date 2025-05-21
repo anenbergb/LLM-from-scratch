@@ -1,5 +1,4 @@
-<img width="628" alt="Screenshot 2025-05-20 at 5 38 10 PM" src="https://github.com/user-attachments/assets/a3db71ce-749b-460c-8a44-35222c5df775" /># Parallelism
-
+# Parallelism
 ## Part 1: Networking Basics for LLMs
 
 ### Limits of GPU-based Scaling
@@ -143,7 +142,7 @@ together with FSDP if we shard the weights and the activations along correspondi
 - All-reduce required in forward/backward passes!
 - Ideal within a node (fast interconnects), e.g. the 8 GPUs on a single node.
 
-####  🔄 Tensor vs Pipeline Parallelism
+#### Tensor vs Pipeline Parallelism
 
 ✅ Pros of Tensor Parallelism
 - **No idle time**: No bubbles if network is fast — no waiting for other devices.
@@ -157,45 +156,67 @@ together with FSDP if we shard the weights and the activations along correspondi
 
 > Use tensor parallelism when you have low-latency, high-bandwidth interconnects.
 
-### Sequence Parallelism
-- Split activations across the **sequence** axis
-- Enables linear memory scaling for activations
 
 ### Memory Challenges
 - **Activation memory** is dynamic and often exceeds parameter memory
 - **Recomputation** and **sequence parallelism** can reduce memory use
 
----
+### Sequence Parallelism (Activation)
 
+<img width="600" src="https://github.com/user-attachments/assets/dc207e3a-9d7b-4046-b7ca-4f8513c23e78" />
 
-### Activation Parallelism
-- sequence parallel
+- Split activations across the **sequence** axis
+- Enables linear memory scaling for activations
 
-#### Expert Parallelism (EP)
-We separate experts (in Mixture-of-Experts models) onto different
-devices, and each device computes the output results for their own expert.
+Activation Memory Per Transformer Layer
 
-
-
-## 🛠️ Advanced & Hybrid Strategies
-
-### Expert Parallelism
-- Split model "experts" across GPUs (used in MoE models)
+| Configuration                                                                 | Activation Memory Expression                        |
+|------------------------------------------------------------------------------|------------------------------------------------------|
+| No parallelism                                                               | *sbh* (34 + 5 *a<sup>s</sup>*/h)                     |
+| Tensor parallel (baseline)                                                   | *sbh* (10 + 24/t + 5 *a<sup>s</sup>*/(h·t))          |
+| Tensor + Sequence parallel                                                   | *sbh* (34/t + 5 *a<sup>s</sup>*/(h·t))               |
+| Tensor parallel + Selective activation recomputation                         | *sbh* (10 + 24/t)                                   |
+| Tensor + Sequence parallel + Selective activation recomputation              | *sbh* (34/t)                                        |
 
 ### Context Parallelism / Ring Attention
 - Split attention heads or contexts across GPUs
+- Each machine is responsible for a different query, and then keys/values travel between machines in a ring-like fashion.
 
-### 3D Parallelism
+#### Expert Parallelism (EP)
+- Split model "experts" across GPUs (used in MoE models)
+- each device computes the output results for their own expert
+- the networking is more complicated since one expert could be overloaded
+
+## LLM Parallelism Comparison Table
+
+| Strategy               | Sync Overhead              | Memory       | Bandwidth                                 | Batch Size | Easy to Use? |
+|------------------------|----------------------------|--------------|-------------------------------------------|------------|--------------|
+| DDP / ZeRO1            | Per-batch                  | **No scaling** | 2 × #params                              | **Linear** | Very         |
+| FSDP (ZeRO3)           | **3× Per-FSDP block**       | Linear       | 3 × #params                               | **Linear** | Very         |
+| Pipeline               | Per-pipeline               | Linear       | Activations                               | **Linear** | NO           |
+| Tensor + Sequence      | **2× transformer block**    | Linear       | **8 × activations per-layer all-reduce** | No impact  | No           |
+
+Have to balance limited resource – memory, bandwidth, batch size
+- if batch size is too small, then there's no way to be efficient
+- as batch size increases, you can mix FSDP and Tensor Parallel you can get to a point where you're compute bound
+- if batch size is very big, then you can get away with just pure FSDP
+
+<img width="500" src="https://github.com/user-attachments/assets/abde96b7-0ae5-468d-8c23-90264f37a092" />
+
+## 3D Parallelism
 - Combine:
   - **Tensor parallel (within node)**
   - **Pipeline parallel (across nodes)**
   - **Data parallel (across batches)**
 
 #### Strategy:
-1. Fit model with tensor/pipeline parallelism
-2. Scale training with data parallelism
+1. Fit model into memory with tensor/pipeline parallelism
+- Tensor parallel up to GPUs / machine
+- Pipeline parallel across machines
+- Or use ZeRO-3 depending on bandwidth
+2. Scale training (across all GPUs) with data parallelism
 
----
+- if your batch size is small, use gradient accumulation to trade higher batch sizes for better communication efficiency since you're synchronizing less often across machines.
 
 ## 🧪 Real-World Examples
 
@@ -204,8 +225,6 @@ devices, and each device computes the output results for their own expert.
 - **Yi**: ZeRO1 + Tensor + Pipeline; Yi-Lightning uses Expert parallel
 - **LLaMA3 405B**: Mixed strategies per training stage
 - **Gemma 2 (2B, 9B, 27B)**: ZeRO-3, Model Parallel (TP+SP), Data Parallel
-
----
 
 ## 🧾 Final Recap
 
@@ -217,7 +236,6 @@ devices, and each device computes the output results for their own expert.
   - Data parallel for final scaling
 - Activation memory is a key bottleneck—must be managed explicitly.
 
----
 
 ## 📚 Further Reading
 
