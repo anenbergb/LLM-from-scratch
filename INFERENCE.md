@@ -277,9 +277,81 @@ Batching over sequences in live traffic is tricky because:
 - Sequences have shared prefixes (e.g., system prompts, generating multiple samples)
 - Sequences have different lengths (padding is inefficient)
 
-## Summary
+### Continuous Batching
+- [Orca: distributed server system for transformer based generative models](https://www.usenix.org/system/files/osdi22-yu.pdf)
+- https://www.youtube.com/watch?v=Ob9PPLxETYU
 
-### Taking shortcuts (lossy)
+<img width="600" src="https://github.com/user-attachments/assets/bb3bcd56-23c1-4923-8fd7-483a3c5a123e" />
+
+**Problem:**
+- Training: get a dense block of tokens (batch size x sequence length)
+- Inference: requests arrive and finish at different times, so you have a ragged array
+
+**Solution: iteration-level scheduling**
+- Decode step by step
+- Add new requests to the batch as they arrive (so don't have to wait until generation completes)
+
+**Problem:**
+- Batching only works when all sequences have the same dimensionality (right?)
+- But each request might have a different length
+
+**Solution: selective batching**
+- Training: when all sequences of the same length, operate on a B x S x H tensor
+- But we might have different lengths: [3, H], [9, H], [5, H], etc.
+- Attention computation: process each sequence separately
+- Non-attention computation: concatenate all the sequences together to [3 + 9 + 5, H]
+
+### Paged Attention
+- Paper that introduced vLLM in addition to PagedAttention https://arxiv.org/pdf/2309.06180
+
+**Previous status quo:**
+- Request comes in
+- Allocate section of KV cache for prompt and response (up to a max length)
+
+![image](https://github.com/user-attachments/assets/9ea9242a-d317-4437-b55d-bb2289969266)
+
+**Problem: fragmentation** (what happens to your hard drive)
+- But this is wasteful since we might generate much fewer tokens (internal fragmentation)!
+- Might be extra unused space between sections (external fragmentation)!
+
+**Solution: PagedAttention** (remember operating systems)
+- Divide the KV cache of a sequence into non-contiguous blocks
+
+<img width="600" src="https://github.com/user-attachments/assets/e050bf95-5808-453b-97f2-bacab4c65e79" />
+
+Two requests share the KV caches:
+
+<img width="600" src="https://github.com/user-attachments/assets/097deb70-b634-4ed3-a04a-6f693784ea52" />
+
+In general, multiples types of sharing KV caches across sequences:
+
+<img width="600" src="https://github.com/user-attachments/assets/635c73fd-bc62-4b1d-bf6e-18c9ee6aedfe" />
+
+- Sharing the system prompt
+- Sampling multiple responses per prompt (e.g., for program synthesis)
+
+**Solution:** share prefixes, copy-on-write at the block level
+
+
+<img width="600" src="https://github.com/user-attachments/assets/937d3735-080e-4f8f-b58d-cb552ddca873" />
+
+Other vLLM optimizations:
+- Kernel to fuse block read and attention (reduce kernel launch overhead)
+- Use latest kernels (FlashAttention, FlashDecoding)
+- Use CUDA graphs to avoid kernel launch overhead
+
+
+**Summary:** use ideas from operating systems (paging) to make use of memory for dynamic workloads
+
+    
+## Summary
+- Inference is important (actual use, evaluation, reinforcement learning)
+- Different characteristics compared to training (memory-limited, dynamic)
+- Techniques: new architectures, quantization, pruning/distillation, speculative decoding
+- Ideas from systems (speculative execution, paging)
+- New architectures have huge potential for improvement
+
+**Taking shortcuts (lossy)**
 - reduce kv cache size
 - alternatives to the transformer
 - quantization
@@ -296,8 +368,9 @@ Summary: reduce inference complexity without hurting accuracy
 2. Initialize weights using original model (which has a different architecture)
 3. Repair faster model (distillation)
 
-### Taking shortcuts but double check (lossless)
+**Taking shortcuts but double check (lossless)**
 - speculative sampling
+
 
 ## References:
 - https://jax-ml.github.io/scaling-book/
