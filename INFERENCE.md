@@ -192,6 +192,112 @@ Weaknesses:
 
 - significant gains in inference
 
+# Quantization
+- Key idea: reduce the precision of numbers
+- Less memory means lower latency/ higher throughput (since inference is memory-limited).
+- **Quantization-aware training (QAT):** train with quantization, but doesn't scale up
+- **Post-training quantization (PTQ):** run on sample data to determine scale and zero point for each layer or tensor
+
+<img width="400" src="https://github.com/user-attachments/assets/9d9a4cb9-8d90-4399-99b0-973fa5feddf4" />
+
+-  fp32 (4 bytes): needed for parameters and optimizer states during training
+-  bf16 (2 bytes): default for inference
+-  fp8 (1 byte) [-240, 240] for e4m3 on H100s: can train if you dare
+-  int8 (1 byte) [-128, 127]: less accurate but cheaper than fp8, but for inference only
+- int4 (0.5 bytes) [-8, 7]: cheaper, even less accurate
+
+### LLM.int8()
+- Standard quantization (scale by max of absolute values)
+- https://huggingface.co/blog/hf-bitsandbytes-integration
+- The motivation is storage (fiting big model into memory). Inference speed is 15-23% slower than fp16
+
+<img width="600" src="https://github.com/user-attachments/assets/3bcb4470-8385-421d-835c-d15fdd53579e" />
+
+- Problem: outliers (which appear in larger networks) screw everything up
+- Solution: extract outliers and process them in fp16
+
+### Activation-aware Quantization
+- https://arxiv.org/abs/2306.00978
+- Idea: select which weights (0.1-1%) to keep in high precision based on activations
+- fp16 -> int3 produces 4x lower memory, 3.2x speedup
+
+<img width="800" src="https://github.com/user-attachments/assets/9eaafbbc-951f-4917-a94c-8af3bb260296" />
+
+### Model Pruning
+- Key idea: just rip out parts of an expensive model to make it cheaper
+- The reduced model is worse than the original, but the accuracy can be restored by distillation from the original model.
+- https://arxiv.org/abs/2407.14679
+
+** Algorithm:**
+1. Identify important {layer, head, hidden dimension} on a small calibration dataset (1024 samples)
+2. Remove unimportant layers to get a smaller model
+3. Distill the original model into pruned model
+
+<img width="800" src="https://github.com/user-attachments/assets/1e9c1860-1350-4357-8db0-413a20e0a25f" />
+
+### Speculative Sampling (decoding)
+two stages of KV cache inference
+- Prefill: given a sequence, encode tokens in parallel (compute-limited) [note: also gives you probabilities]
+- Generation: generate one token at a time (memory-limited)
+
+Idea: checking is faster than generation
+- Use a cheaper draft model p to guess a few tokens (e.g., 4)
+- Evaluate with target model q (process tokens in parallel), and accept if it looks good\
+
+[speculative sampling video](https://storage.googleapis.com/gweb-research2023-media/media/SpeculativeDecoding-1-Illustration.mp4)
+
+<img width="600" src="https://github.com/user-attachments/assets/530a9515-0604-45f4-bee3-be550b83690a" />
+
+- This is modified rejection sampling with proposal p and target q
+- Modification: always generate at least one candidate (rejection sampling will keep looping)
+- Key property: guaranteed to be an exact sample from the target model!
+
+In practice:
+- Target model has 70B parameters, draft model has 8B parameters
+- Target model has 8B parameters, draft model has 1B parameters
+- Try to make draft model as close to target (distillation)
+
+**Medusa:** draft model generates multiple tokens in parallel
+- https://arxiv.org/abs/2401.10774
+    
+**EAGLE:** draft model takes high-level features from target model
+- https://arxiv.org/pdf/2401.15077
+
+<img width="600" src="https://github.com/user-attachments/assets/df919fca-85e4-4509-bc07-7de23c9443dd" />
+
+
+**Summary:**
+- Exact sampling from target model (thanks to math)!
+- Exploits asymmetry between checking and generation
+- Lots of room for innovation on the draft model (involves training)
+
+# Handling Dynamic workloads
+Batching over sequences in live traffic is tricky because:
+- Requests arrive at different times (waiting for batch is bad for early requests)
+- Sequences have shared prefixes (e.g., system prompts, generating multiple samples)
+- Sequences have different lengths (padding is inefficient)
+
+## Summary
+
+### Taking shortcuts (lossy)
+- reduce kv cache size
+- alternatives to the transformer
+- quantization
+- pruning
+
+Summary: reduce inference complexity without hurting accuracy
+
+**From scratch recipe:**
+1. Define faster model architecture
+2. Train faster model
+
+**Distillation recipe:**
+1. Define faster model architecture
+2. Initialize weights using original model (which has a different architecture)
+3. Repair faster model (distillation)
+
+### Taking shortcuts but double check (lossless)
+- speculative sampling
 
 ## References:
 - https://jax-ml.github.io/scaling-book/
