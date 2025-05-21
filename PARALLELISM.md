@@ -9,7 +9,6 @@
 - Intra-node: High-speed interconnects within a machine. NVLink connects GPUs directly, bypass CPU
 - Inter-node: High-speed networking across machines. NVSwitch connects GPUs directly, bypass Ethernet
 
-
 <img width="400" src="https://github.com/user-attachments/assets/c75cf7b7-d6e6-4fde-bb2e-feb0447ed918" />
 
 **Generalized hierarchy (from small/fast to big/slow):**
@@ -63,6 +62,14 @@
 - Supports multiple backends for different hardware: gloo (CPU), nccl (GPU)
 - Also supports higher-level algorithms (e.g., FullyShardedDataParallel) 
 ## Part 2: Parallel LLM Training Forms
+
+**Quick Overview**
+- **data parallelism**: Cut up along the batch dimension
+- **tensor/expert parallelism**: Cut up along the width dimension
+- **pipeline parallelism**: Cut up along the depth dimension
+- **sequence parallelism**: Cut up along the length
+- Can re-compute or store in memory or store in another GPUs memory and communicate
+- Hardware is getting faster, but will always want bigger models, so will have this hierarchical structure
 
 ### Data parallelism
 Sharding strategy: each rank gets a slice of the data
