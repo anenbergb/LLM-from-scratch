@@ -1,11 +1,14 @@
 # Scaling Laws
 
+This section reviews techniques for fitting scaling laws for training large language models (LLMs), with a focus on the Chinchilla approach by Hoffmann et al
 
-## Scaling Laws Overview
-
-This section reviews techniques for fitting scaling laws for training large language models (LLMs), with a focus on the Chinchilla approach by Hoffmann et al The main question addressed is:
+The main question addressed is:
 
 > Given a fixed compute budget C, what combination of model size N, number of training tokens D, and other hyperparameters minimizes final training loss?
+
+Hyperparameters to select include:
+- model architecture hyperparameters such as width, depth, embedding dimension
+- optimizer hyperparameters such as batch size and learning rate
 
 
 ### Key Challenges
@@ -31,7 +34,6 @@ For each compute budget C, models with varying sizes N are trained using dataset
 - Small models cannot fit the data well, resulting in high loss.
 - As model size increases, loss decreases smoothly until it eventually **increases again** due to limited gradient updates at fixed compute.
 
----
 
 ## Fitting the Scaling Laws
 
@@ -55,9 +57,23 @@ compute budget: 10^23 FLOPS, optimal model size: 5.00e+10 params, optimal data s
 compute budget: 10^24 FLOPS, optimal model size: 1.27e+11 params, optimal data size: 1.33e+12 tokens
 ```
 
-## Summary
+## Key Strategies and Solutions
+**muP (μ-Parametrization)**: 
+- Makes hyperparameter tuning invariant to model width.
+- Used in Cerebras-GPT and MiniCPM to stabilize training across different model sizes.
 
-The IsoFLOPs methodology enables practical and empirical modeling of scaling laws. By analyzing training runs with equal compute and selecting configurations with minimal loss, researchers can derive scaling relationships that predict optimal model and dataset sizes. These insights are crucial for efficiently scaling LLMs without exhaustive hyperparameter sweeps at massive scales.
+**Learning Rate Schedules**:
+- **WSD (Warmup-Stable-Decay)** schedule used to approximate full scaling law sweeps more efficiently.
+- Preferred over cosine schedules when performing Chinchilla-style analysis.
 
+**Scaling Law Fit Methods**:
+- **Chinchilla Method 1**: Lower envelope of training curves.
+- **Chinchilla Method 3**: Joint fitting of multiple runs for better efficiency.
+- **IsoFLOPs**: Compute-budget-based analysis used by DeepSeek and others.
 
-
+### Model-Specific Notes
+- **Cerebras-GPT**: Combines muP with Chinchilla scaling laws.
+- **MiniCPM**: Uses muP and WSD learning rate; fits Method 3.
+- **DeepSeek**: Does not use muP; performs direct batch/LR fits and Method 2 (IsoFLOPs).
+- **LLaMA 3 & Hunyuan-1**: Rely on isoflops-style scaling; fewer tuning details disclosed.
+- **MiniMax-01**: Focuses on architectural scaling and Method 1 analysis.
