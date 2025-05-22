@@ -1,6 +1,14 @@
 # A Modern Large Language Model Implementation
-This project implements a modern LLM from scratch.
-The project was inspired by [assignment #1 of Stanford CS336](https://github.com/stanford-cs336/assignment1-basics).
+
+This repository features a from-scratch implementation of a modern large language model (LLM), developed while following the [Stanford CS336 course on LLMs (Spring 2025)](https://stanford-cs336.github.io/spring2025/). It includes most of the course assignments from the [official GitHub repo](https://github.com/stanford-cs336/), along with summarized lecture notes.
+
+## Key highlights
+- Byte Pair Encoding (BPE) tokenizer  
+- Autoregressive causal Transformer with:
+  - RMSNorm  
+  - SwiGLU activation  
+  - Rotary Positional Embeddings (RoPE)  
+- Flash Attention 2 implementation in Triton with extensive GPU benchmarking
 
 
 ### Installation
