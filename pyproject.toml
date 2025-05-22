@@ -26,6 +26,7 @@ dependencies = [
     "tabulate",
     "humanfriendly",
     "llnl-hatchet",
+    "scipy",
 ]
 
 [project.optional-dependencies]
