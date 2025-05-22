@@ -44,7 +44,20 @@ Rather than fitting a full curve to each profile, a **simplified method** is use
   \]
 - These relationships allow extrapolation to larger budgets for determining the best model/data allocation.
 
+**For example, we can fit power laws for optimal model size and data size given a fixed compute budget** 
+
+<img width="400" src="https://github.com/user-attachments/assets/2157bcb0-44bb-4a8e-afa7-1c233bdcc022" />
+<img width="400" src="https://github.com/user-attachments/assets/3a704ca1-34db-41d7-98d9-ebd850ce47d2" />
+
+Then we can extrapolate the optimal model size and data size for large compute budget sizes
+```
+compute budget: 10^23 FLOPS, optimal model size: 5.00e+10 params, optimal data size: 3.37e+11 tokens
+compute budget: 10^24 FLOPS, optimal model size: 1.27e+11 params, optimal data size: 1.33e+12 tokens
+```
 
 ## Summary
 
 The IsoFLOPs methodology enables practical and empirical modeling of scaling laws. By analyzing training runs with equal compute and selecting configurations with minimal loss, researchers can derive scaling relationships that predict optimal model and dataset sizes. These insights are crucial for efficiently scaling LLMs without exhaustive hyperparameter sweeps at massive scales.
+
+
+
