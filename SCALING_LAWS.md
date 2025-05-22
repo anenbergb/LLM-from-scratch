@@ -1,14 +1,52 @@
 # Scaling Laws
-
-This section reviews techniques for fitting scaling laws for training large language models (LLMs), with a focus on the Chinchilla approach by Hoffmann et al
-
-The main question addressed is:
-
 > Given a fixed compute budget C, what combination of model size N, number of training tokens D, and other hyperparameters minimizes final training loss?
 
-Hyperparameters to select include:
-- model architecture hyperparameters such as width, depth, embedding dimension
-- optimizer hyperparameters such as batch size and learning rate
+- Scaling laws enable prediction, optimization, and resource-efficient design.
+- Predict optimal:
+  - Model size
+  - Data scale
+  - Hyperparameters
+  - Compute allocation
+- Guide training decisions before large-scale investment.
+
+
+### Motivation
+- Designing LLMs with limited time and massive compute (e.g. 10,000 H100s).
+- Need efficient strategies: infra setup, data collection, model design.
+- **Key question:** Which model size and configuration yields best performance?
+
+### Introduction to Scaling Laws
+- **Old approach:** Tune large models directly (expensive).
+- **Modern approach:** Tune small models, extrapolate with scaling laws.
+
+### Practical Data Scaling Considerations
+- **Data selection and quality:** Impacts offset, not slope.
+- **Repetition effects:** Repeated data has diminishing returns.
+- **Adaptive selection:** Data choice should depend on training scale.
+
+### Model Engineering via Scaling Laws
+- **Architecture:** Transformers scale better than LSTMs.
+- **Optimizer:** Adam generally outperforms SGD in scaling behavior.
+- **Depth vs Width:** Tradeoffs; embedding layers behave differently.
+- **Batch Size:** Diminishing returns after critical batch size.
+- **Learning Rates:** Use scale-aware methods (e.g. muP).
+
+### Joint Model-Data Scaling Laws
+- Joint error models:  
+  \[
+  $\text{Error} = n^{-\alpha} + m^{-\beta} + C$
+  \]
+- Helps balance model size and dataset size under budget.
+
+### Compute Tradeoffs
+- **Chinchilla insight:** More tokens per parameter yields better results under fixed compute.
+- Recent models (e.g. LLaMA 3) use >200 tokens per parameter.
+
+### Fitting Scaling Laws (Chinchilla Methods)
+1. **Method 1:** Minimum over all training runs.
+2. **Method 2:** IsoFLOPs — minimum loss per fixed compute budget.
+3. **Method 3:** Joint fits (less reliable, data forensics required).
+
 
 
 ### Key Challenges
