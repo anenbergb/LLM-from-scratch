@@ -72,19 +72,22 @@ with human feedback" https://arxiv.org/abs/2203.02155
 
 ### Core RL Algorithms for Language Models
 
-#### A. PPO (Proximal Policy Optimization)
+#### PPO (Proximal Policy Optimization)
+
+<img width="400" src="https://github.com/user-attachments/assets/98382020-4eb7-4239-945d-525b51333104" />
+
 - **Theory**:
   - Starts from policy gradients: ∇θ Eₚθ[R(z) ∇θ log pθ(z)]
   - TRPO introduces KL constraints.
   - PPO simplifies this with a clipping mechanism to avoid large policy shifts.
-
+ 
 - **Practice**:
   - Requires value model for advantage estimation.
   - KL-penalized per-token rewards + full-sequence reward.
   - Generalized Advantage Estimation (GAE) reduces variance.
   - Drawback: complex and memory-intensive, especially due to the value model.
 
-### B. DPO (Direct Preference Optimization)
+#### DPO (Direct Preference Optimization)
 - **Goal**: Remove the need for reward models and on-policy rollouts.
 - **Method**:
   - Non-parametric assumption links policy and reward.
@@ -92,12 +95,13 @@ with human feedback" https://arxiv.org/abs/2203.02155
 - **Pros**: Simpler implementation, competitive performance.
 - **Cons**: Requires pairwise data (not always available), typically offline.
 
-### C. GRPO (Group Regularized Policy Optimization)
+#### GRPO (Group Regularized Policy Optimization)
 - **Goal**: Simpler alternative to PPO for verifiable rewards.
 - **Key Features**:
   - No value model or GAE.
   - Advantage = z-score within group.
   - Normalize rewards by group std, enabling online updates.
+  - For each question prompt, you sample multiple responses which become a "group"
 - **Biases**:
   - Length normalization can cause bias towards longer responses.
   - Standard deviation as baseline does not preserve unbiasedness.
@@ -105,11 +109,10 @@ with human feedback" https://arxiv.org/abs/2203.02155
   - Alternatives proposed (e.g., leave-one-out baselining).
   - Still prone to reward overfitting and language mixing in output.
 
----
 
-## III. Case Studies in RLVR
+#### Case Studies in RLVR
 
-### A. DeepSeek R1
+### DeepSeek R1
 - **Setup**:
   - Uses GRPO (no process supervision).
   - Verifiable accuracy and formatting rewards.
@@ -132,7 +135,7 @@ with human feedback" https://arxiv.org/abs/2203.02155
 - **Infrastructure**:
   - Uses vLLM workers with dummy weights for rollout, torn down after each iteration.
 
-### C. Qwen 3
+#### Qwen 3
 - **Distinctive Features**:
   - Low-data RLVR (GRPO on ~4k samples).
   - “Thinking mode fusion”: toggle thinking vs. non-thinking responses.
@@ -141,9 +144,8 @@ with human feedback" https://arxiv.org/abs/2203.02155
   - Filtering of too-easy questions and low-quality CoTs.
   - RLHF follows reasoning RL and SFT.
 
----
 
-## IV. Practical Considerations in RL Infrastructure
+### Practical Considerations in RL Infrastructure
 - **Challenges**:
   - On-policy learning (PPO/GRPO) is compute-intensive.
   - Long CoTs cause uneven batch processing.
@@ -152,9 +154,7 @@ with human feedback" https://arxiv.org/abs/2203.02155
   - Sync LLM weights between inference and RL workers.
   - Use dummy weight vLLMs to manage memory constraints.
 
----
-
-## V. Key Themes & Takeaways
+### Key Themes & Takeaways
 - **Overoptimization**: RL models may overfit proxy reward signals, diverging from human intent.
 - **Biases in Learning**: GRPO may skew towards easy/hard tasks or longer completions.
 - **RLVR Frameworks**: Verifiable rewards + simple RL (like GRPO) scale well in structured domains.
