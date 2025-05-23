@@ -1,8 +1,6 @@
-# Alignment
+# Alignment: Supervised Fine-Tuning (SFT)
 
-# Alignment: Reinforcement Learning from Human Feedback (RLHF)
-
-## Overview
+### Overview
 - Goal: Improve and align LM outputs using instruction tuning and RLHF.
 - Problem: Pretraining data is broad but misaligned; fine-tuning data is costly and limited.
 
@@ -10,7 +8,7 @@
 OpenAI InstructGPT "Training language models to follow instructions
 with human feedback" https://arxiv.org/abs/2203.02155
 
-## Instruction Tuning (Supervised Fine-Tuning / SFT)
+### Instruction Tuning (Supervised Fine-Tuning / SFT)
 - Based on expert demonstrations.
 - Effective when extracting *pretrained* knowledge and behaviors.
 - **Datasets:**
@@ -25,7 +23,7 @@ with human feedback" https://arxiv.org/abs/2203.02155
 - Ideal to fine-tune on pretraining-known facts only.
 - Safety tuning possible with ~500 samples. But there's a risk that you might refuse legitimate requests such as (e.g., handling questions like "How can I kill a Python process") 
 
-## Scaling Instruction Tuning
+### Scaling Instruction Tuning
 - **Instruction tuning as pretraining**:
   1. Pretrain on web-scale data.
   2. Mix in instruction data.
@@ -37,7 +35,7 @@ with human feedback" https://arxiv.org/abs/2203.02155
 <img width="800" src="https://github.com/user-attachments/assets/861e533e-2713-4ecd-8554-945fe5538353" />
 
 
-## Reinforcement Learning with Human Feedback (RLHF)
+# Alignment: Reinforcement Learning with Human Feedback (RLHF)
 
 ### Motivation
 - SFT data is expensive; RLHF reduces annotation cost.
@@ -59,24 +57,22 @@ with human feedback" https://arxiv.org/abs/2203.02155
 - **Mode Collapse**: Loss of diversity and probabilistic modeling in outputs.
 - **Style Bias**: Preference data can introduce unintended biases (e.g., toward verbosity).
 
-## Summary
+### Summary
 - SFT is best used to extract, not inject, knowledge.
 - RLHF provides a scalable path for aligning models, but introduces new risks.
 - DPO is a promising alternative to PPO with fewer moving parts.
 - Effective alignment requires balancing data quality, diversity, and safety.
 
-# Lecture 16 Outline: Reinforcement Learning from Verifiable Rewards (RLVR)
+# Alignment: Reinforcement Learning from Verifiable Rewards (RLVR)
 
-## I. Introduction & Motivation
+### Motivation:
 - RLHF has limitations: overoptimization, lack of calibration, mode collapse.
 - Verifiable rewards enable more stable, scalable RL in domains with clear correctness.
 - Empirical results in RL are setup-dependent—careful interpretation is essential.
 
----
+### Core RL Algorithms for Language Models
 
-## II. Core RL Algorithms for Language Models
-
-### A. PPO (Proximal Policy Optimization)
+#### A. PPO (Proximal Policy Optimization)
 - **Theory**:
   - Starts from policy gradients: ∇θ Eₚθ[R(z) ∇θ log pθ(z)]
   - TRPO introduces KL constraints.
