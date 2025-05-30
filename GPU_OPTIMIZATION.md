@@ -167,7 +167,7 @@ I implemented the following optimizations on top of the baseline Flash Attention
 - Avoid per-element masking for tiles that are guarenteed to be fully valid -- e.g. those squarely beneath the lower diagonal
 - Only apply causal masking to the diagonal tiles
 
-I benchmarked my FlashAttention v2 implementation and observed a **\~7× speedup** in inference performance compared to the naive PyTorch version. This was measured using Query, Key, and Value tensors with batch size 1, sequence length 13,312, embedding dimension 64, causal masking enabled, and the bfloat16 data type. All experiments were conducted on an NVIDIA RTX 5090 GPU.
+I benchmarked my FlashAttention v2 implementation and observed a **\~7× speedup** in end-to-end runtime (forward + backward) of the attention operation compared to the naive PyTorch version. This was measured using Query, Key, and Value tensors with batch size 1, sequence length 13,312, embedding dimension 64, causal masking enabled, and the bfloat16 data type. All experiments were conducted on an NVIDIA RTX 5090 GPU.
 
 [flash attention implementation](llm/flash_attention.py)
 
